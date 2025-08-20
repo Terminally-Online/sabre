@@ -1,0 +1,258 @@
+[rapier]
+# The listen address for Rapier. This is the address that Rapier will listen on
+# for incoming requests. You can change this to any address you want, but make
+# sure that the address is available and not used by any other service.
+#
+# It is recommended you run this on the same machine that consumes your node and
+# not the machine that runs your node. This is because Rapier is designed to be a
+# high-throughput caching layer that sits in front of your node, and it will
+# perform better if it is running on the machine that can take advantage of
+# local write/read speeds without the overhead of network latency.
+listen = ":3000"
+# The maximum number of times Rapier will retry a specific request across the 
+# set of configured nodes before giving up. Since we burst-fire rather than 
+# sequentially iterate, it is wise to set `max_retries` to 2 * the max number of 
+# different RPCs you have on any given chain. For example, if you have 3 RPCs 
+# configured for Ethereum, but only 1 RPC on Base, you should set `max_retries`
+# to 6. This way, if the first RPC fails, Rapier will try the next one and so on,
+# until it either succeeds or exhausts all the configured nodes.
+#
+# Out-of-the-box the default is set to the number of unique providers you have
+# in your config at a 1:1 ratio. If you have 3 providers, it will make up to 
+# 3 attempts. If you overwrite this, make sure to set it to a value that is
+# greater than or equal to the number of unique providers you have configured.
+max_attempts=3
+
+[performance]
+# The timeout for individual requests to backend nodes in milliseconds. This controls
+# how long Rapier will wait for a response from a node before considering it failed.
+# This should be set lower than your application's timeout requirements to ensure
+# unhealthy backends are detected before they affect user requests.
+timeout_ms = 2000
+# The TTL for block cache in milliseconds. This is currently reserved for future
+# subscription implementation and is not used in the current version. When subscriptions
+# are implemented, this will control how long block data is cached.
+ttl_block_ms = 13000
+# The number of latency samples to maintain for each backend. Rapier tracks the
+# last N request latencies to calculate average performance. A larger number provides
+# more stable weighting but takes longer to adapt to performance changes. A smaller
+# number adapts faster but may be more volatile. The default of 100 provides a good
+# balance between stability and responsiveness.
+#
+# If a backend becomes unhealthy, Rapier will stop sending requests to it for a 
+# period of time. A high number here does not prevent the ejection of a backend
+# that is unhealthy and should not be included in the rotation.
+samples = 100
+# The gamma factor controls how aggressively Rapier prefers faster backends over
+# slower ones. This value ranges from 0.0 to infinity, where:
+# - gamma = 0.0: Equal weighting (no performance preference)
+# - gamma = 0.5: Moderate preference for faster backends
+# - gamma = 1.0: Linear preference (2x faster = 2x more traffic)
+# - gamma = 2.0: Quadratic preference (2x faster = 4x more traffic)
+# - gamma > 2.0: Very aggressive preference for fastest backends
+#
+# The formula used is: weight = (latency_ratio)^(-gamma)
+# where latency_ratio = backend_latency / fastest_backend_latency
+#
+# A gamma of 0.9 provides a good balance between performance optimization and
+# distribution, ensuring faster backends get more traffic while preventing
+# complete starvation of slower but still functional backends.
+gamma = 0.9
+# This is the total number of connections that Rapier will keep open to all
+# backends. If you have a single orchestrator, you can set this to 1. If you are
+# not sure what you should have this set to, you can leave it at the default.
+max_idle_conns = 8192
+# The maximum number of idle connections to maintain per individual backend host.
+# This prevents any single slow or problematic backend from monopolizing the connection
+# pool. If you have a single orchestrator, you can set this to 1. If you are not sure
+# what you should have this set to, you can leave it at the default like all others.
+max_idle_conns_per_host = 2048
+# How long to keep idle connections open before closing them (in milliseconds).
+# Longer durations improve connection reuse but may hold onto connections to
+# backends that are no longer needed. 90 seconds balances reuse with resource cleanup.
+idle_conn_timeout_ms = 90000
+# Whether to disable HTTP keep-alives entirely. When set to true, every request
+# creates a new connection, significantly increasing latency and resource usage.
+# Only disable this for debugging connection-related issues.
+disable_keep_alives = false
+# Whether to enable HTTP/2 support for backend connections. HTTP/2 multiplexing
+# allows multiple concurrent requests over a single connection, reducing connection
+# overhead and improving performance.
+enable_http2 = true
+# The maximum number of concurrent streams per HTTP/2 connection. Higher values
+# allow more concurrent requests per connection but may overwhelm slower backends.
+# 250 provides good concurrency while preventing backend overload. For most
+# Terminally Online use cases, we run with a far lower ~30, but it's up to you.
+# An over-provisioned value is better than an under-provisioned value here.
+max_concurrent_streams = 250
+# Whether to enable HTTP compression (gzip/deflate) for requests and responses.
+# Compression typically reduces JSON-RPC payload sizes by 60-80%, significantly
+# improving performance over slower network connections at minimal CPU cost.
+#
+# If you are running Rapier on a machine that has a lot of memory, you can set
+# this to true and set the compression level to a higher value. If you are running
+# Rapier on a machine that has a lot of CPU, you can set this to false and set
+# the compression level to a lower value.
+enable_compression = true
+# Compression level from 1 (fastest, least compression) to 9 (slowest, best compression).
+# Level 6 provides an excellent balance between compression ratio and CPU usage.
+# Consider lower values (3-4) for CPU-constrained environments or higher values (7-8)
+# when bandwidth is severely limited.
+compression_level = 6
+
+[batch]
+# Enable automatic request batching to reduce network overhead and improve throughput.
+# When enabled, Rapier will group multiple incoming requests to the same backend into
+# batches, reducing the number of HTTP connections and improving overall performance.
+# Batching is most effective when you have high request volume to the same backends.
+enabled = true
+# The maximum number of requests to include in a single batch. Larger batches
+# provide better throughput but may increase latency for individual requests.
+# A value of 10 provides a good balance between throughput and responsiveness.
+max_batch_size = 10
+# The maximum time to wait before processing a batch (in milliseconds). This
+# controls how long Rapier waits for more requests to arrive before sending
+# the current batch. Lower values reduce latency but may result in smaller
+# batches and lower throughput. 50ms provides a good balance.
+max_batch_wait_ms = 50
+# The maximum number of concurrent batch workers per backend. Each worker
+# processes batches independently, allowing multiple batches to be sent
+# simultaneously. Higher values increase concurrency but may overwhelm
+# slower backends. 4 workers provide good concurrency without overloading.
+max_batch_workers = 4
+
+# Health checking allows Rapier to automatically detect and route around unhealthy
+# backend nodes. When enabled, Rapier will periodically send health check requests
+# to each configured backend to ensure they are responding correctly. If a backend
+# fails multiple consecutive health checks, it will be temporarily removed from
+# the load balancer rotation until it passes health checks again.
+[health]
+# Enable or disable health checking for all backends. When disabled, all backends
+# are considered healthy and will receive traffic regardless of their actual status.
+# This is useful for testing or when you want to manually control backend availability.
+enabled = true
+# The interval between health check requests in milliseconds. Health checks are
+# sent to each backend at this frequency to monitor their responsiveness. A lower
+# value provides faster failure detection but increases overhead. A higher value
+# reduces overhead but may delay detection of backend failures.
+ttl_check_ms = 1000
+# The maximum time to wait for a health check response in milliseconds. If a
+# backend doesn't respond within this timeout, the health check is considered
+# failed. This should be set lower than your application's timeout requirements
+# to ensure unhealthy backends are detected before they affect user requests.
+timeout_ms = 1500
+# The number of consecutive failed health checks required before a backend is
+# marked as unhealthy and removed from the load balancer rotation. This prevents
+# temporary network hiccups from immediately taking backends offline. A higher
+# value makes the system more tolerant of intermittent failures but may delay
+# response to actual backend issues.
+fails_to_down = 2
+# The number of consecutive successful health checks required before a previously
+# unhealthy backend is marked as healthy and returned to the load balancer
+# rotation. This ensures that backends are fully recovered before receiving
+# production traffic again.
+passes_to_up = 2
+# The JSON-RPC method to use for health checks. This method should be lightweight
+# and commonly supported by all Ethereum nodes. The default "eth_blockNumber" is
+# ideal as it's a simple read operation that doesn't require parameters and
+# provides a good indication that the node is functioning properly.
+method = "eth_blockNumber"
+
+[cache]
+# The cache is enabled by default, but you can disable it if you want to run
+# Rapier without caching. This is useful for testing or debugging purposes.
+# If you disable the cache, Rapier will still work, but it will be slower and
+# will make more requests to the node.
+enabled = true
+# The path to the cache directory. This is where Rapier will store the cached
+# data. You can change this to any directory you want, but make sure that the
+# directory exists and is writable by the user running Rapier. If you want to 
+# bootstrap Prometheus metrics on top of Rapier, you can set this to a directory
+# that is mounted to a persistent volume in your container or VM.
+path = "./.data/rapier"
+# The clean flag controls whether Rapier should clean up old cache files on startup.
+# When set to true, Rapier will remove any cached data that has expired or is no
+# longer valid, ensuring a fresh start and preventing cache corruption issues. 
+# This is particularly useful in development environments or when you want to
+# ensure you're getting the most up-to-date data from your nodes.
+#
+# Set this to false if you want to preserve all cached data across restarts,
+# which can be beneficial for production environments where you want to maintain
+# cache performance and reduce initial load times.
+clean = true
+# Maximum depth of re-orgs to protect against (in blocks).
+# This determines:
+# 1. How many recent block hashes to keep in memory for comparison
+# 2. How far back to validate cached data against known block hashes
+# 3. The threshold for considering blocks "stable" vs "recent"
+# A value of 100 means we'll track the last 100 blocks and be conservative
+# with data from recent blocks. Higher values provide better protection
+# but use more memory and may reduce cache effectiveness.
+max_reorg_depth = 100
+# The maximum number of entries in the cache. This is the maximum number of
+# entries that Rapier will keep in memory. If the cache exceeds this limit,
+# Rapier will evict the least recently used entries. You can change this to any
+# number you want, but keep in mind that a larger cache will use more memory.
+# Modern computers have plenty of memory, so you can set this to a large number
+# if you want to keep more entries in the cache.
+mem_entries = 100000
+# The TTL for the latest block cache is set to 250ms, which is sufficient for
+# most use cases. If you are running a high-throughput application or a modern L2 
+# that has blocks in the 200-500ms range, you may want to increase this value to 
+# reduce the number of requests to the node. If you're really cool you will lower
+# it and run things as fast as you can.
+ttl_latest_ms = 250
+# The TTL for the block cache is set to 24 hours. Rather than being concerned with
+# liveness in the way that we are for latest, our focus for ttl_block is keeping a 
+# hot cache without storing data that you aren't actually using.
+ttl_block_ms = 86400000
+
+# QuickNode is a fast, reliable, and pretty affordable Ethereum node provider.
+# At Terminally Online we run our own nodes, but QuickNode is our fallback when
+# ours is fully saturated or when we need to scale quickly. If you don't already
+# have a high-throughput endpoint, go ahead and get one:
+#
+# → Get yours at: https://quicknode.com/signup?via=chance
+[quicknode]
+# The second-tier plan of QuickNode maxes out at 125 requests per second, which 
+# is sufficient for most use cases. Typically, your only option would be to 
+# upgrade your plan, but you are here now so you know what to do.
+max_per_second = 100
+
+# Chain support has been completely abstracted away from the codebase. Due to this,
+# when you define a new chain, you do that by including a chain name suffix like the
+# one below. This allows you to define multiple chains with different providers while
+# sharing the configuration of that single provider. Further, in the case that a 
+# provider has a chain-agnostic endpoint you can define that by setting the title
+# to something like: [quicknode.ethereum,base] or [quicknode.1,8453].
+#
+# For providers that offer chain-specific URLs, you can use the CHAIN_NAME placeholder
+# in your URL configuration. Rapier will automatically replace CHAIN_NAME with the
+# actual chain name when creating backends. You can freely combine CHAIN_NAME with
+# environment variables in the same URL. For example:
+#   url = "https://${QUICKNODE_NAME}.CHAIN_NAME.quiknode.pro/${QUICKNODE_ID}/"
+#   This would become: https://your-name.ethereum.quiknode.pro/your-id/ for ethereum
+#   And: https://your-name.base.quiknode.pro/your-id/ for base
+#
+# Environment variables (${VAR_NAME}) are processed first by the system, then CHAIN_NAME
+# replacement occurs during backend creation. This allows flexible configurations like:
+#   url = "https://${API_HOST}.CHAIN_NAME.${DOMAIN}/${API_KEY}/"
+#
+# If your URL doesn't contain CHAIN_NAME, Rapier will use the same URL for all chains
+# in the configuration, which is the traditional behavior.
+[quicknode.1]
+url = "https://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
+ws_url = "wss://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
+
+# Drpc is a decentralized RPC node provider to Ethereum, Polygon, Arbitrum and others
+# that avoid the typical concerns that exist when using centralized providers. At
+# Terminally Online we believe Drpc to be a great option for your fallback provider.
+[drpc]
+max_per_second = 40
+
+# Of course, since we have a primary node for Ethereum mainnet, we are going to provide
+# a similarly defined Drpc provider that can stand-in for the primary node. Although,
+# at a much slower rate of requests and downstream throughput.
+[drpc.1]
+url = "https://eth.drpc.org"
+ws_url = "wss://eth.drpc.org"

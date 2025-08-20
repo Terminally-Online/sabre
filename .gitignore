@@ -1,0 +1,63 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+rapier
+bin/
+
+# Test binary, built with 'go test -c'
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Cache and database directories
+rapier-cache/
+*.db
+*.sqlite
+*.pebble
+
+# Log files
+*.log
+
+# IDE directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.vim
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local configuration
+config.local.toml
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Debug files
+debug
+__debug_bin*
+
+# Go module cache
+go.sum.backup
