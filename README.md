@@ -38,19 +38,19 @@ Before you run ⚔️ **sabre**, we need to setup your RPC providers.
 With your `config.local.toml` file ready, you can run ⚔️ **sabre** with:
 
 ```bash
-go run ./cmd/sabre -c config.local.toml
+./sabre -c config.local.toml
 ```
 
 or you can see all the available flags with:
 
 ```bash
-go run ./cmd/sabre --help
+./sabre --help
 ```
 
 You can also check the version with:
 
 ```bash
-go run ./cmd/sabre --version
+./sabre --version
 ```
 
 ## Usage
@@ -77,20 +77,3 @@ func NewClient(ctx context.Context, chain *chains.Chain, scheme string) (*Client
 ```
 
 Only 4 lines of code needed to get a multichain client that has built in retries, batching, and failover.
-
-## Automated Builds
-
-This project uses GitHub Actions for automated builds and releases:
-
-- **Builds**: Every push to `main` triggers builds for Linux, macOS, and Windows
-- **Releases**: When you create a tag starting with `v` (e.g., `v1.0.0`), it automatically creates a GitHub release with binaries for all platforms
-- **Testing**: All builds include comprehensive testing with race condition detection
-
-To create a new release:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-The GitHub Action will automatically build and release binaries for all supported platforms.
