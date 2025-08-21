@@ -4,11 +4,12 @@
 *.dll
 *.so
 *.dylib
-sabre
 bin/
+build/
 
 # Test binary, built with 'go test -c'
 *.test
+*.data
 
 # Output of the go coverage tool
 *.out
@@ -23,7 +24,6 @@ go.work.sum
 vendor/
 
 # Cache and database directories
-sabre-cache/
 *.db
 *.sqlite
 *.pebble
