@@ -1,0 +1,34 @@
+name: Test Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.1"
+
+      - name: List directory contents
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
+          echo "cmd directory contents:"
+          ls -la cmd/
+          echo "cmd/sabre directory contents:"
+          ls -la cmd/sabre/
+
+      - name: Test build
+        run: |
+          echo "Testing build from cmd/sabre directory"
+          go build -o sabre-test ./cmd/sabre
+          echo "Build successful!"
+          ./sabre-test --version

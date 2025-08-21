@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Version and build information - set by linker flags
 var (
 	Version   = "dev"
 	BuildTime = "unknown"
