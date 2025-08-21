@@ -60,7 +60,7 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -o sabre-windows-amd64.exe .
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sabre-binaries
           path: |
