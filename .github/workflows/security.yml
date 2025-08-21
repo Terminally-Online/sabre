@@ -31,7 +31,7 @@ jobs:
 
       - name: Run dependency vulnerability scan
         run: |
-          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest || go install github.com/securecodewarrior/gosec/cmd/gosec@latest
+          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
           gosec ./...
 
       - name: Check for secrets in code
