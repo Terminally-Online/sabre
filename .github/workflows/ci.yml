@@ -54,10 +54,10 @@ jobs:
 
       - name: Build for multiple platforms
         run: |
-          GOOS=linux GOARCH=amd64 go build -o sabre-linux-amd64 .
-          GOOS=darwin GOARCH=amd64 go build -o sabre-darwin-amd64 .
-          GOOS=darwin GOARCH=arm64 go build -o sabre-darwin-arm64 .
-          GOOS=windows GOARCH=amd64 go build -o sabre-windows-amd64.exe .
+          GOOS=linux GOARCH=amd64 go build -o sabre-linux-amd64 ./cmd/sabre
+          GOOS=darwin GOARCH=amd64 go build -o sabre-darwin-amd64 ./cmd/sabre
+          GOOS=darwin GOARCH=arm64 go build -o sabre-darwin-arm64 ./cmd/sabre
+          GOOS=windows GOARCH=amd64 go build -o sabre-windows-amd64.exe ./cmd/sabre
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
