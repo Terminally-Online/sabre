@@ -47,7 +47,7 @@ The value of `{chain_domain}` is the value you set when configuring the urls of 
 url = "..."
 ```
 
-Setting it to the name or chain id has worked well for me. Then you can create a simple function like:
+When it comes to integrating your client you can create a simple function like:
 
 ```go
 func NewClient(ctx context.Context, chain *chains.Chain, scheme string) (*Client, error) {
@@ -58,43 +58,3 @@ func NewClient(ctx context.Context, chain *chains.Chain, scheme string) (*Client
 
 Only 4 lines of code needed to get a multichain client that has built in retries, batching, and failover.
 
-## Development
-
-### Running Tests
-
-```bash
-# Run all tests
-go test ./...
-
-# Run tests with coverage
-go test -v -race -coverprofile=coverage.out ./...
-go tool cover -func=coverage.out
-
-# Run specific test packages
-go test ./internal/backend -v
-go test ./internal/router -v
-```
-
-### CI/CD
-
-This project uses GitHub Actions for continuous integration. The following workflows are configured:
-
-- **Tests** (`.github/workflows/test.yml`): Runs tests on every push and pull request
-- **CI** (`.github/workflows/ci.yml`): Comprehensive CI pipeline including linting, static analysis, and multi-platform builds
-- **Security** (`.github/workflows/security.yml`): Security scanning including vulnerability checks and secret detection
-
-All workflows run automatically on:
-
-- Push to `main` or `master` branches
-- Pull requests to `main` or `master` branches
-- Security scans also run weekly via cron schedule
-
-### Code Quality
-
-The CI pipeline includes:
-
-- **Linting**: Uses `golint` to check code style
-- **Static Analysis**: Uses `staticcheck` for advanced static analysis
-- **Race Detection**: Tests run with `-race` flag to detect race conditions
-- **Security Scanning**: Uses `govulncheck` and `gosec` for vulnerability detection
-- **Secret Detection**: Uses `trufflehog` to detect accidentally committed secrets
