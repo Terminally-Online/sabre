@@ -20,7 +20,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Version and build information - set by linker flags
 var (
 	Version   = "dev"
 	BuildTime = "unknown"
@@ -68,14 +67,12 @@ func animate() func() {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	
-	// Add version flag
+
 	showVersion := flag.Bool("version", false, "show version information")
 	cfgPath := flag.String("c", "config.toml", "path to config.toml file")
 	envPath := flag.String("e", ".env", "path to .env file")
 	flag.Parse()
-	
-	// Show version and exit if requested
+
 	if *showVersion {
 		fmt.Printf("sabre version %s (built %s)\n", Version, BuildTime)
 		os.Exit(0)

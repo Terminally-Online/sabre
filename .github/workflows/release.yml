@@ -49,13 +49,23 @@ jobs:
     needs: test
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        goarch: [amd64, arm64]
-        exclude:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: ""
           - os: windows-latest
-            goarch: arm64
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
           - os: macos-latest
-            goarch: arm64
+            goos: darwin
+            goarch: amd64
+            ext: ""
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -77,16 +87,19 @@ jobs:
 
       - name: Build
         env:
-          GOOS: ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags "-X main.Version=${{ github.ref_name }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o sabre-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}-${{ matrix.goarch }}${{ matrix.os == 'windows-latest' && '.exe' || '' }} ./cmd/sabre
+          echo "Building for ${{ matrix.os }}/${{ matrix.goarch }}"
+          echo "GOOS: ${{ matrix.goos }}"
+          echo "GOARCH: ${{ matrix.goarch }}"
+          go build -ldflags "-X main.Version=${{ github.ref_name }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o sabre-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/sabre
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: sabre-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}-${{ matrix.goarch }}
-          path: sabre-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}-${{ matrix.goarch }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          name: sabre-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: sabre-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   release:
     name: Release
