@@ -37,4 +37,4 @@ jobs:
       - name: Check for secrets in code
         run: |
           docker run --rm -v "${{ github.workspace }}:/pwd" trufflesecurity/trufflehog:latest \
-            --only-verified --fail /pwd
+            filesystem --directory /pwd --only-verified --fail
