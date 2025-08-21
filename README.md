@@ -25,7 +25,7 @@ Download the latest release for your platform from the [releases page](https://g
 For development, you can run directly with:
 
 ```bash
-go run ./cmd/sabre/main.go
+go run ./cmd/sabre
 ```
 
 ## Quickstart
@@ -38,19 +38,19 @@ Before you run ⚔️ **sabre**, we need to setup your RPC providers.
 With your `config.local.toml` file ready, you can run ⚔️ **sabre** with:
 
 ```bash
-./sabre -c config.local.toml
+go run ./cmd/sabre -c config.local.toml
 ```
 
 or you can see all the available flags with:
 
 ```bash
-./sabre --help
+go run ./cmd/sabre --help
 ```
 
 You can also check the version with:
 
 ```bash
-./sabre --version
+go run ./cmd/sabre --version
 ```
 
 ## Usage
