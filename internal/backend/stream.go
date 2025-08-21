@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Stream manages WebSocket connections and subscriptions for real-time blockchain data.
 type Stream struct {
 	cfg           Config
 	loadBalancer  *LoadBalancer
@@ -27,6 +28,7 @@ type Stream struct {
 	upgrader      websocket.Upgrader
 }
 
+// WebsocketConnection represents a single WebSocket connection to a backend.
 type WebsocketConnection struct {
 	Backend       *Backend
 	Conn          *websocket.Conn
@@ -39,6 +41,7 @@ type WebsocketConnection struct {
 	messageCount  atomic.Int64
 }
 
+// WebsocketClient represents a WebSocket client that can subscribe to events.
 type WebsocketClient struct {
 	ID            string
 	Chain         string
@@ -50,6 +53,7 @@ type WebsocketClient struct {
 	lastActivity  atomic.Value
 }
 
+// Subscription represents a single subscription request from a client.
 type Subscription struct {
 	ID       string          `json:"subscription"`
 	Method   string          `json:"method"`
@@ -59,6 +63,7 @@ type Subscription struct {
 	Created  time.Time       `json:"created"`
 }
 
+// Message represents a JSON-RPC message.
 type Message struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -68,6 +73,7 @@ type Message struct {
 	Error   any             `json:"error,omitempty"`
 }
 
+// NewStream creates a new stream manager for WebSocket connections and subscriptions.
 func NewStream(cfg Config, loadBalancer *LoadBalancer) *Stream {
 	stream := &Stream{
 		cfg:           cfg,
@@ -89,6 +95,7 @@ func NewStream(cfg Config, loadBalancer *LoadBalancer) *Stream {
 	return stream
 }
 
+// Shutdown gracefully shuts down the stream manager and closes all connections.
 func (wm *Stream) Shutdown(ctx context.Context) {
 	wm.mu.Lock()
 	for _, client := range wm.clients {
@@ -111,6 +118,7 @@ func (wm *Stream) Shutdown(ctx context.Context) {
 	wm.mu.Unlock()
 }
 
+// HandleWebSocket handles WebSocket upgrade requests and manages client connections.
 func (wm *Stream) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	chain := strings.Trim(strings.TrimSpace(r.URL.Path), "/")
 	if chain == "" {

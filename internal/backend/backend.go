@@ -9,6 +9,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Backend represents a single RPC backend with health monitoring, rate limiting,
+// and performance tracking capabilities.
 type Backend struct {
 	Name                      string
 	Chain                     string

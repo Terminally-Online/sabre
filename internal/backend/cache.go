@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// CacheConfig holds configuration for the cache store.
 type CacheConfig struct {
 	Enabled       bool          `toml:"enabled"`
 	Path          string        `toml:"path"`
@@ -26,6 +27,7 @@ type CacheConfig struct {
 	MaxReorgDepth int           `toml:"max_reorg_depth"`
 }
 
+// Store provides persistent caching with TTL support and block hash validation.
 type Store struct {
 	cfg          CacheConfig
 	db           *pebble.DB
@@ -38,10 +40,12 @@ type Store struct {
 	reorgChecker *time.Ticker
 }
 
+// Config returns the current cache configuration.
 func (s *Store) Config() CacheConfig {
 	return s.cfg
 }
 
+// Close closes the cache store and releases all resources.
 func (s *Store) Close() error {
 	if s.reorgChecker != nil {
 		s.reorgChecker.Stop()
@@ -52,6 +56,7 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// UpdateLatestBlock updates the latest block information for chain reorg detection.
 func (s *Store) UpdateLatestBlock(chainID string, blockNum uint64, blockHash string, blockData []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,6 +131,7 @@ func (s *Store) cleanupOldBlockHashes(chainID string) {
 	}
 }
 
+// IsBlockHashValid checks if a cached block hash is still valid (no reorg detected).
 func (s *Store) IsBlockHashValid(chainID string, entryBlockHash string, entryBlockNum uint64) bool {
 	if entryBlockHash == "" {
 		return true
@@ -147,6 +153,7 @@ func (s *Store) IsBlockHashValid(chainID string, entryBlockHash string, entryBlo
 	return true
 }
 
+// Get retrieves a value from the cache by key.
 func (s *Store) Get(key string) ([]byte, bool) {
 	if !s.cfg.Enabled {
 		return nil, false
@@ -181,6 +188,7 @@ func (s *Store) Get(key string) ([]byte, bool) {
 	return nil, false
 }
 
+// Put stores a value in the cache with the specified TTL and chain ID.
 func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string) {
 	if !s.cfg.Enabled || ttl <= 0 {
 		return
@@ -211,6 +219,7 @@ func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string) 
 	}
 }
 
+// Do executes a function and caches the result if the key is not already cached.
 func (s *Store) Do(key string, fn func() ([]byte, error)) ([]byte, error) {
 	if b, ok := s.Get(key); ok {
 		return b, nil
@@ -235,6 +244,7 @@ type entry struct {
 	BlockNum  uint64 `json:"block_num,omitempty"`
 }
 
+// Open creates and initializes a new cache store with the given configuration.
 func Open(cfg CacheConfig) (*Store, error) {
 	if cfg.MemEntries <= 0 {
 		cfg.MemEntries = 100_000
@@ -261,6 +271,7 @@ func Open(cfg CacheConfig) (*Store, error) {
 	return &Store{db: db, mem: mem, cfg: cfg}, nil
 }
 
+// CanonicalKey generates a canonical cache key for a JSON-RPC request.
 func CanonicalKey(chainID, method string, params json.RawMessage) (string, error) {
 	h := sha256.New()
 	h.Write([]byte(chainID))
@@ -278,6 +289,7 @@ func CanonicalKey(chainID, method string, params json.RawMessage) (string, error
 	return fmt.Sprintf("v1:%x", h.Sum(nil)), nil
 }
 
+// TTL determines the appropriate time-to-live for caching a specific RPC method.
 func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *SubscriptionsConfig) time.Duration {
 	switch method {
 	case "eth_getBlockByNumber", "eth_getBalance", "eth_getCode", "eth_getStorageAt", "eth_call":
@@ -327,6 +339,7 @@ func logsNumericRange(params json.RawMessage) bool {
 	return low && hi
 }
 
+// ExtractBlockInfo extracts block number and hash from a JSON-RPC response.
 func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 	var resp struct {
 		Result json.RawMessage `json:"result"`
@@ -377,6 +390,7 @@ func extractParentHashFromBlockData(blockData []byte) string {
 	return ""
 }
 
+// CheckReorgFromHealthResponse checks for chain reorgs using health response data.
 func (s *Store) CheckReorgFromHealthResponse(response []byte, chainID string) {
 	if blockNum, blockHash := ExtractBlockInfo(response); blockNum > 0 {
 		s.UpdateLatestBlock(chainID, blockNum, blockHash, response)

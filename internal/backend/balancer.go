@@ -15,6 +15,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// LoadBalancer distributes requests across multiple backends using weighted
+// random selection based on health status, performance metrics, and rate limiting.
 type LoadBalancer struct {
 	mu       sync.RWMutex
 	backends map[string][]*Backend
@@ -22,6 +24,7 @@ type LoadBalancer struct {
 	seed     uint64
 }
 
+// NewLoadBalancer creates a new load balancer instance with the provided configuration.
 func NewLoadBalancer(cfg Config) *LoadBalancer {
 	lb := &LoadBalancer{
 		backends: make(map[string][]*Backend, len(cfg.BackendsCt)),
@@ -48,6 +51,7 @@ func NewLoadBalancer(cfg Config) *LoadBalancer {
 	return lb
 }
 
+// Pick selects a healthy backend for the given chain and scheme (http/ws) using weighted random selection.
 func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backend, error) {
 	lb.mu.RLock()
 	bes := lb.backends[chain]
@@ -172,6 +176,7 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backen
 	return bes[ready[len(ready)-1]], nil
 }
 
+// UpdateLatency updates the performance metrics for a backend and recalculates weights.
 func (lb *LoadBalancer) UpdateLatency(backend *Backend, latency time.Duration, cfg PerformanceConfig) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -193,6 +198,7 @@ func (lb *LoadBalancer) UpdateLatency(backend *Backend, latency time.Duration, c
 	lb.weigh(backend.Chain, cfg)
 }
 
+// GetBackends returns all backends for the specified chain.
 func (lb *LoadBalancer) GetBackends(chain string) []*Backend {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
@@ -203,6 +209,7 @@ func (lb *LoadBalancer) GetBackends(chain string) []*Backend {
 	return result
 }
 
+// GetWeights returns the current weights for all backends in the specified chain.
 func (lb *LoadBalancer) GetWeights(chain string) []float64 {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
@@ -213,6 +220,7 @@ func (lb *LoadBalancer) GetWeights(chain string) []float64 {
 	return result
 }
 
+// Monitor continuously monitors backend health and performance, updating weights accordingly.
 func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Store) {
 	if !cfg.Health.Enabled {
 		return

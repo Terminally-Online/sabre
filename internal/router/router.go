@@ -26,12 +26,14 @@ const (
 	idleTimeout       = 120 * time.Second
 )
 
-var (
-	TotalReq atomic.Uint64
+// TotalReq tracks the total number of requests processed by the router.
+var TotalReq atomic.Uint64
 
+var (
 	bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 )
 
+// ErrServerClosed is returned when the server is shutting down.
 var ErrServerClosed = http.ErrServerClosed
 
 type rpcReq struct {
@@ -41,6 +43,7 @@ type rpcReq struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// NewRouter creates a new HTTP router for handling JSON-RPC requests.
 func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalancer) *http.Server {
 	defer fmt.Fprintln(os.Stdout)
 

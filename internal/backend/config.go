@@ -26,11 +26,13 @@ var reservedKeys = map[string]bool{
 	"max_attempts":  true,
 }
 
+// SabreConfig holds the main configuration for the Sabre load balancer.
 type SabreConfig struct {
 	Listen      string `toml:"listen"`
 	MaxAttempts int    `toml:"max_attempts"`
 }
 
+// HealthConfig holds the configuration for health checks.
 type HealthConfig struct {
 	Enabled      bool          `toml:"enabled"`
 	TTLCheck     time.Duration `toml:"ttl_check_ms"`
@@ -40,6 +42,7 @@ type HealthConfig struct {
 	SampleMethod string        `toml:"method"`
 }
 
+// PerformanceConfig holds the configuration for HTTP/2 performance.
 type PerformanceConfig struct {
 	Timeout              time.Duration `toml:"timeout_ms"`
 	Samples              int           `toml:"samples"`
@@ -54,6 +57,7 @@ type PerformanceConfig struct {
 	CompressionLevel     int           `toml:"compression_level"`
 }
 
+// SubscriptionsConfig holds the configuration for WebSocket subscriptions.
 type SubscriptionsConfig struct {
 	TTLBlock                      time.Duration `toml:"ttl_block_ms"`
 	MaxConnectionsPerBackend      int           `toml:"max_connections_per_backend"`
@@ -66,6 +70,7 @@ type SubscriptionsConfig struct {
 	MaxMessageSize                int64         `toml:"max_message_size"`
 }
 
+// BatchConfig holds the configuration for batching.
 type BatchConfig struct {
 	Enabled          bool          `toml:"enabled"`
 	MaxBatchSize     int           `toml:"max_batch_size"`
@@ -83,6 +88,7 @@ type chainOnly struct {
 	MaxPerSecond *int   `toml:"max_per_second"`
 }
 
+// Config holds the complete configuration for the Sabre load balancer.
 type Config struct {
 	Sabre          SabreConfig
 	Health         HealthConfig
@@ -97,6 +103,7 @@ type Config struct {
 	Stream         *Stream
 }
 
+// ParseConfig reads and parses a TOML configuration file.
 func ParseConfig(path string) Config {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -239,7 +246,6 @@ func ParseConfig(path string) Config {
 		raw, _ := toml.Marshal(s)
 		_ = toml.Unmarshal(raw, &sc)
 
-		// Set WebSocket defaults
 		if sc.MaxConnectionsPerBackend <= 0 {
 			sc.MaxConnectionsPerBackend = 100
 		}
@@ -295,7 +301,6 @@ func ParseConfig(path string) Config {
 		raw, _ := toml.Marshal(b)
 		_ = toml.Unmarshal(raw, &bc)
 
-		// Set batching defaults
 		if bc.MaxBatchSize <= 0 {
 			bc.MaxBatchSize = 10
 		}
@@ -318,7 +323,6 @@ func ParseConfig(path string) Config {
 			)
 		}
 	} else {
-		// Set batch defaults when section is missing
 		cfg.Batch = BatchConfig{
 			Enabled:          false,
 			MaxBatchSize:     10,
@@ -351,7 +355,6 @@ func ParseConfig(path string) Config {
 			cc.TTLBlock = cc.TTLBlock * time.Millisecond
 		}
 
-		// Set re-org protection defaults
 		if cc.MaxReorgDepth <= 0 {
 			cc.MaxReorgDepth = 100
 		}
@@ -370,7 +373,6 @@ func ParseConfig(path string) Config {
 		}
 		cfg.Cache = cc
 	} else {
-		// Set cache defaults when section is missing
 		cfg.Cache = CacheConfig{
 			Enabled:       false,
 			Path:          "./.data/sabre",

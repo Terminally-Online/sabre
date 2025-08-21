@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// BatchRequest represents a single JSON-RPC request within a batch.
 type BatchRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -17,6 +18,7 @@ type BatchRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// BatchResponse represents a single JSON-RPC response within a batch.
 type BatchResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -24,6 +26,7 @@ type BatchResponse struct {
 	Error   any             `json:"error,omitempty"`
 }
 
+// BatchProcessor groups multiple RPC requests into batches for efficient processing.
 type BatchProcessor struct {
 	mu sync.Mutex
 
@@ -35,6 +38,7 @@ type BatchProcessor struct {
 	workers chan struct{}
 }
 
+// Batch represents a collection of requests to be sent to a single backend.
 type Batch struct {
 	BackendURL    string
 	Requests      []BatchRequest
@@ -44,6 +48,7 @@ type Batch struct {
 	mu            sync.RWMutex
 }
 
+// NewBatchProcessor creates a new batch processor with the specified configuration.
 func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int) *BatchProcessor {
 	return &BatchProcessor{
 		maxBatchSize:  maxBatchSize,
@@ -54,6 +59,7 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurren
 	}
 }
 
+// AddRequest adds a request to a batch and returns a channel to receive the response.
 func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest) (<-chan BatchResponse, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
@@ -191,6 +197,7 @@ func (bp *BatchProcessor) sendBatch(backendURL string, requests []BatchRequest) 
 	return responses, nil
 }
 
+// FlushAll processes all pending batches immediately.
 func (bp *BatchProcessor) FlushAll() {
 	bp.mu.Lock()
 	batches := make([]*Batch, 0, len(bp.batches))
@@ -205,6 +212,7 @@ func (bp *BatchProcessor) FlushAll() {
 	}
 }
 
+// GetBatchCount returns the number of active batches (for testing).
 func (bp *BatchProcessor) GetBatchCount() int {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
