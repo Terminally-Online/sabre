@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-rapier
+sabre
 bin/
 
 # Test binary, built with 'go test -c'
@@ -23,7 +23,7 @@ go.work.sum
 vendor/
 
 # Cache and database directories
-rapier-cache/
+sabre-cache/
 *.db
 *.sqlite
 *.pebble

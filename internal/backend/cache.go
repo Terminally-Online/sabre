@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -87,8 +86,6 @@ func (s *Store) UpdateLatestBlock(chainID string, blockNum uint64, blockHash str
 func (s *Store) detectReorg(chainID string, newBlockNum uint64, newBlockHash string, blockData []byte) bool {
 	if existingHash, exists := s.blockHashes[chainID][newBlockNum]; exists {
 		if existingHash != newBlockHash {
-			log.Printf("Re-org detected on chain %s: Block %d changed from %s to %s",
-				chainID, newBlockNum, existingHash[:12]+"...", newBlockHash[:12]+"...")
 			return true
 		}
 	}
@@ -96,8 +93,6 @@ func (s *Store) detectReorg(chainID string, newBlockNum uint64, newBlockHash str
 	if newBlockNum > 0 && newBlockNum <= s.latestBlocks[chainID] {
 		if existingHash, exists := s.blockHashes[chainID][newBlockNum]; exists {
 			if existingHash != newBlockHash {
-				log.Printf("Re-org detected on chain %s: Historical block %d inconsistency %s vs %s",
-					chainID, newBlockNum, existingHash[:12]+"...", newBlockHash[:12]+"...")
 				return true
 			}
 		}
@@ -108,8 +103,6 @@ func (s *Store) detectReorg(chainID string, newBlockNum uint64, newBlockHash str
 		if parentHash, exists := s.blockHashes[chainID][parentBlockNum]; exists {
 			if newBlockParentHash := extractParentHashFromBlockData(blockData); newBlockParentHash != "" {
 				if newBlockParentHash != parentHash {
-					log.Printf("Re-org detected on chain %s: Block %d parent mismatch. Expected: %s, Got: %s",
-						chainID, newBlockNum, parentHash[:12]+"...", newBlockParentHash[:12]+"...")
 					return true
 				}
 			}
@@ -285,10 +278,13 @@ func CanonicalKey(chainID, method string, params json.RawMessage) (string, error
 	return fmt.Sprintf("v1:%x", h.Sum(nil)), nil
 }
 
-func TTL(method string, params json.RawMessage, cfg CacheConfig) time.Duration {
+func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *SubscriptionsConfig) time.Duration {
 	switch method {
 	case "eth_getBlockByNumber", "eth_getBalance", "eth_getCode", "eth_getStorageAt", "eth_call":
 		if isBlockNumberTag(params) {
+			if subsCfg != nil && subsCfg.TTLBlock > 0 {
+				return subsCfg.TTLBlock
+			}
 			return cfg.TTLBlock
 		}
 		return cfg.TTLLatest
@@ -296,6 +292,9 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig) time.Duration {
 		return cfg.TTLLatest
 	case "eth_getLogs":
 		if logsNumericRange(params) {
+			if subsCfg != nil && subsCfg.TTLBlock > 0 {
+				return subsCfg.TTLBlock
+			}
 			return cfg.TTLBlock
 		}
 		return cfg.TTLLatest
@@ -328,7 +327,6 @@ func logsNumericRange(params json.RawMessage) bool {
 	return low && hi
 }
 
-// ExtractBlockInfo attempts to extract block number and hash from a JSON-RPC response
 func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 	var resp struct {
 		Result json.RawMessage `json:"result"`
@@ -338,13 +336,11 @@ func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 		return 0, ""
 	}
 
-	// Try to extract from different response types
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return 0, ""
 	}
 
-	// Check for block number
 	if num, ok := result["number"].(string); ok {
 		if strings.HasPrefix(num, "0x") {
 			if parsed, err := strconv.ParseUint(num[2:], 16, 64); err == nil {
@@ -353,7 +349,6 @@ func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 		}
 	}
 
-	// Check for block hash
 	if hash, ok := result["hash"].(string); ok {
 		blockHash = hash
 	}
@@ -361,7 +356,6 @@ func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 	return blockNum, blockHash
 }
 
-// extractParentHashFromBlockData extracts the parent hash from block data
 func extractParentHashFromBlockData(blockData []byte) string {
 	var resp struct {
 		Result json.RawMessage `json:"result"`
@@ -371,13 +365,11 @@ func extractParentHashFromBlockData(blockData []byte) string {
 		return ""
 	}
 
-	// Try to extract from block object
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return ""
 	}
 
-	// Check for parent hash
 	if parentHash, ok := result["parentHash"].(string); ok {
 		return parentHash
 	}
@@ -385,7 +377,6 @@ func extractParentHashFromBlockData(blockData []byte) string {
 	return ""
 }
 
-// CheckReorgFromHealthResponse checks for re-orgs using health check response data
 func (s *Store) CheckReorgFromHealthResponse(response []byte, chainID string) {
 	if blockNum, blockHash := ExtractBlockInfo(response); blockNum > 0 {
 		s.UpdateLatestBlock(chainID, blockNum, blockHash, response)

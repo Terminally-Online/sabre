@@ -1,0 +1,40 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run security scans weekly
+    - cron: "0 0 * * 0"
+
+jobs:
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Run Go security audit
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Run dependency vulnerability scan
+        run: |
+          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+          gosec ./...
+
+      - name: Check for secrets in code
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/pwd" trufflesecurity/trufflehog:latest \
+            --only-verified --fail /pwd

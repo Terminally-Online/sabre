@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"maps"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -19,8 +20,8 @@ type BatchRequest struct {
 type BatchResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
-	Result  interface{}     `json:"result,omitempty"`
-	Error   interface{}     `json:"error,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   any             `json:"error,omitempty"`
 }
 
 type BatchProcessor struct {
@@ -35,10 +36,12 @@ type BatchProcessor struct {
 }
 
 type Batch struct {
-	BackendURL string
-	Requests   []BatchRequest
-	Responses  chan []BatchResponse
-	Created    time.Time
+	BackendURL    string
+	Requests      []BatchRequest
+	ResponseChans map[string]chan BatchResponse
+	Created       time.Time
+	Full          bool
+	mu            sync.RWMutex
 }
 
 func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int) *BatchProcessor {
@@ -51,29 +54,58 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurren
 	}
 }
 
-func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest) (<-chan []BatchResponse, error) {
+func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest) (<-chan BatchResponse, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
 	batch, exists := bp.batches[backendURL]
 	if !exists {
 		batch = &Batch{
-			BackendURL: backendURL,
-			Requests:   make([]BatchRequest, 0, bp.maxBatchSize),
-			Responses:  make(chan []BatchResponse, 1),
-			Created:    time.Now(),
+			BackendURL:    backendURL,
+			Requests:      make([]BatchRequest, 0, bp.maxBatchSize),
+			ResponseChans: make(map[string]chan BatchResponse),
+			Created:       time.Now(),
 		}
 		bp.batches[backendURL] = batch
 
 		go bp.processBatch(batch)
 	}
 
-	batch.Requests = append(batch.Requests, req)
-	if len(batch.Requests) >= bp.maxBatchSize {
-		delete(bp.batches, backendURL)
+	reqCopy := BatchRequest{
+		JSONRPC: req.JSONRPC,
+		Method:  req.Method,
 	}
 
-	return batch.Responses, nil
+	if len(req.ID) > 0 {
+		reqCopy.ID = make(json.RawMessage, len(req.ID))
+		copy(reqCopy.ID, req.ID)
+	} else {
+		reqCopy.ID = json.RawMessage("null")
+	}
+
+	if len(req.Params) > 0 {
+		reqCopy.Params = make(json.RawMessage, len(req.Params))
+		copy(reqCopy.Params, req.Params)
+	} else {
+		reqCopy.Params = json.RawMessage("[]")
+	}
+
+	responseChan := make(chan BatchResponse, 1)
+	reqID := string(req.ID)
+
+	batch.mu.Lock()
+	batch.Requests = append(batch.Requests, reqCopy)
+	batch.ResponseChans[reqID] = responseChan
+	requestCount := len(batch.Requests)
+	batch.mu.Unlock()
+
+	if requestCount >= bp.maxBatchSize {
+		batch.mu.Lock()
+		batch.Full = true
+		batch.mu.Unlock()
+	}
+
+	return responseChan, nil
 }
 
 func (bp *BatchProcessor) processBatch(batch *Batch) {
@@ -83,30 +115,53 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 	timer := time.NewTimer(bp.maxWaitTime)
 	defer timer.Stop()
 
-	select {
-	case <-timer.C:
-	default:
+	batch.mu.RLock()
+	full := batch.Full
+	batch.mu.RUnlock()
+
+	if !full {
+		<-timer.C
 	}
 
-	responses, err := bp.sendBatch(batch.BackendURL, batch.Requests)
+	batch.mu.RLock()
+	requests := make([]BatchRequest, len(batch.Requests))
+	copy(requests, batch.Requests)
+	responseChans := make(map[string]chan BatchResponse, len(batch.ResponseChans))
+	maps.Copy(responseChans, batch.ResponseChans)
+	batch.mu.RUnlock()
+
+	bp.mu.Lock()
+	delete(bp.batches, batch.BackendURL)
+	bp.mu.Unlock()
+
+	responses, err := bp.sendBatch(batch.BackendURL, requests)
 	if err != nil {
-		errorResponses := make([]BatchResponse, len(batch.Requests))
-		for i, req := range batch.Requests {
-			errorResponses[i] = BatchResponse{
-				JSONRPC: req.JSONRPC,
-				ID:      req.ID,
-				Error: map[string]any{
-					"code":    -32603,
-					"message": "Internal error: " + err.Error(),
-				},
+		for _, req := range requests {
+			if ch, exists := responseChans[string(req.ID)]; exists {
+				errorResp := BatchResponse{
+					JSONRPC: req.JSONRPC,
+					ID:      req.ID,
+					Error: map[string]any{
+						"code":    -32603,
+						"message": "Internal error: " + err.Error(),
+					},
+				}
+				select {
+				case ch <- errorResp:
+				default:
+				}
 			}
 		}
-		batch.Responses <- errorResponses
 	} else {
-		batch.Responses <- responses
+		for _, resp := range responses {
+			if ch, exists := responseChans[string(resp.ID)]; exists {
+				select {
+				case ch <- resp:
+				default:
+				}
+			}
+		}
 	}
-
-	close(batch.Responses)
 }
 
 func (bp *BatchProcessor) sendBatch(backendURL string, requests []BatchRequest) ([]BatchResponse, error) {
@@ -138,10 +193,14 @@ func (bp *BatchProcessor) sendBatch(backendURL string, requests []BatchRequest) 
 
 func (bp *BatchProcessor) FlushAll() {
 	bp.mu.Lock()
-	defer bp.mu.Unlock()
-
+	batches := make([]*Batch, 0, len(bp.batches))
 	for _, batch := range bp.batches {
-		go bp.processBatch(batch)
+		batches = append(batches, batch)
 	}
 	bp.batches = make(map[string]*Batch)
+	bp.mu.Unlock()
+
+	for _, batch := range batches {
+		go bp.processBatch(batch)
+	}
 }

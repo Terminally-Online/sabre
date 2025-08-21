@@ -29,8 +29,7 @@ func NewLoadBalancer(cfg Config) *LoadBalancer {
 		seed:     uint64(time.Now().UnixNano()),
 	}
 
-	for i := range cfg.Backends {
-		b := &cfg.Backends[i]
+	for _, b := range cfg.Backends {
 		lb.backends[b.Chain] = append(lb.backends[b.Chain], b)
 
 		b.PerformanceLatencyHistory = make([]time.Duration, 0, cfg.Performance.Samples)
@@ -49,10 +48,14 @@ func NewLoadBalancer(cfg Config) *LoadBalancer {
 	return lb
 }
 
-func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error) {
+func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backend, error) {
 	lb.mu.RLock()
 	bes := lb.backends[chain]
 	weights := lb.weights[chain]
+
+	// Take a snapshot of weights to avoid race conditions
+	weightsSnapshot := make([]float64, len(weights))
+	copy(weightsSnapshot, weights)
 	lb.mu.RUnlock()
 
 	if len(bes) == 0 {
@@ -68,9 +71,16 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error
 			continue
 		}
 
+		if scheme == "ws" && b.WSURL == nil {
+			continue
+		}
+		if scheme == "http" && b.URL == nil {
+			continue
+		}
+
 		if b.limiter == nil || b.limiter.Allow() {
 			ready = append(ready, i)
-			readyWeights = append(readyWeights, weights[i])
+			readyWeights = append(readyWeights, weightsSnapshot[i])
 		}
 	}
 
@@ -84,6 +94,14 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error
 			if !b.HealthUp.Load() {
 				continue
 			}
+
+			if scheme == "ws" && b.WSURL == nil {
+				continue
+			}
+			if scheme == "http" && b.URL == nil {
+				continue
+			}
+
 			if b.limiter == nil {
 				minDelay = 0
 				minIdx = i
@@ -104,6 +122,12 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error
 		}
 
 		if minIdx == -1 {
+			if scheme == "ws" {
+				return nil, fmt.Errorf("no WebSocket-enabled backends for chain %q", chain)
+			}
+			if scheme == "http" {
+				return nil, fmt.Errorf("no HTTP-enabled backends for chain %q", chain)
+			}
 			return nil, fmt.Errorf("no candidate backend")
 		}
 
@@ -127,7 +151,7 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error
 	}
 
 	totalWeight := 0.0
-	for _, w := range weights {
+	for _, w := range readyWeights {
 		totalWeight += w
 	}
 
@@ -139,7 +163,7 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain string) (*Backend, error
 	currentWeight := 0.0
 
 	for i, idx := range ready {
-		currentWeight += weights[i]
+		currentWeight += readyWeights[i]
 		if r <= currentWeight {
 			return bes[idx], nil
 		}
@@ -237,14 +261,11 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 						defer resp.Body.Close()
 
 						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-							// Update latency tracking for healthy responses
 							lb.UpdateLatency(b, d, cfg.Performance)
 
-							// Check for re-orgs using health response data
 							if cacheStore != nil {
 								respBody, _ := io.ReadAll(resp.Body)
 								cacheStore.CheckReorgFromHealthResponse(respBody, b.Chain)
-								// Recreate reader for potential future use
 								resp.Body = io.NopCloser(bytes.NewReader(respBody))
 							}
 

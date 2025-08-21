@@ -1,79 +1,100 @@
-# rapier
+# sabre
 
-⚔️ **rapier** is a minimal, high-performance JSON-RPC load balancer for Ethereum nodes. It’s built with one goal:
+⚔️ **sabre** is a minimal, high-performance JSON-RPC load balancer for Ethereum nodes. It's built with one goal:
 
-1. **send requests as fast as possible across multiple RPC providers with as little ongoing maintenance or thought.**
+1. **get data from multiple RPC providers as fast as possible with as little ongoing maintenance or thought.**
 
 ## Installation
 
 To build from source, you can use the following commands:
 
 ```bash
-git clone https://github.com/terminally-online/rapier.git
-cd rapier
-go build -o rapier
+git clone https://github.com/terminally-online/sabre.git
+cd sabre
+go build -o sabre
 ```
 
-or you can download a pre-built binary from the [releases](https://github.com/terminally-online/rapier/releases) page.
+## Quickstart
 
-## Usage
+Before you run ⚔️ **sabre**, we need to setup your RPC providers.
 
-To run ⚔️ **rapier**, you can use the following command:
+1. Copy `config.toml` to `config.local.toml`
+2. Edit `config.local.toml` to have your RPC providers defined at the bottom.
+
+With your `config.local.toml` file ready, you can run ⚔️ **sabre** with:
 
 ```bash
 go run main.go -c config.local.toml
 ```
 
-or you see all the available options with:
+or you can see all the available flags with:
 
 ```bash
 go run main.go --help
 ```
 
-## Configuration
+## Usage
 
-⚔️ **rapier** is configured via a `config.toml` file that is pre-configured with the most common sane defaults.
+With ⚔️ **sabre** running, you can can submit JSON-RPC requests to the following endpoints:
 
-The configuration is organized into logical sections:
+- `http://localhost{config.listen}/{chain_domain}`
+- `ws://localhost{config.listen}/{chain_domain}`
 
-- **[rapier]**: Core server settings (listen address, retry attempts)
-- **[performance]**: Load balancing, connection pooling, HTTP/2, and compression settings
-- **[batch]**: Request batching configuration for improved throughput
-- **[health]**: Health checking and backend monitoring settings
-- **[cache]**: Caching behavior, storage configuration, cleanup settings, and re-org protection
+The value of `{chain_domain}` is the value you set when configuring the urls of a provider like:
 
-Out-of-box, the only thing **you need to update** is your **RPC provider table(s)**. Though, if you prefer, you can change the values of any and all fields in the configuration file as well as utilize a `.env` file to set the configuration dynamically based on your environment.
+```toml
+[providers.ethereum]
+url = "..."
+```
 
-## Monitoring
+Setting it to the name or chain id has worked well for me. Then you can create a simple function like:
 
-Rapier provides a simple health check endpoint at `/_health` that returns:
+```go
+func NewClient(ctx context.Context, chain *chains.Chain, scheme string) (*Client, error) {
+	rpcURL := fmt.Sprintf("%s://%s/%d", scheme, common.Config.RpcUri, chain.Node.NetworkId)
+	return ethclient.DialContext(ctx, rpcURL)
+}
+```
 
-- **200 OK**: All chains have at least one healthy backend
-- **503 Service Unavailable**: One or more chains have no healthy backends
-- **JSON response**: Detailed status of all backends including latency and failure streaks
+Only 4 lines of code needed to get a multichain client that has built in retries, batching, and failover.
 
-This endpoint combines both health checking and readiness logic, making it perfect for load balancer health checks and monitoring systems.
+## Development
 
-## Re-org Protection
+### Running Tests
 
-Rapier includes built-in protection against blockchain re-orgs to prevent serving stale data. Re-org detection is **automatically integrated with health monitoring** and provides:
+```bash
+# Run all tests
+go test ./...
 
-- **Chain-Aware Detection**: Each chain's re-orgs are tracked independently
-- **Multi-Method Detection**: Uses three complementary detection methods:
-  1. **Block Hash Changes**: Detects when the same block number has a different hash
-  2. **Historical Inconsistencies**: Identifies gaps or inconsistencies in the chain
-  3. **Parent-Child Validation**: Validates block parent-child relationships
-- **Automatic Detection**: Re-orgs are detected during health checks using the same interval
-- **Block Hash Tracking**: Store block numbers and hashes with cached data per chain
-- **Smart Invalidation**: Automatically clear affected cache entries when re-orgs are detected
-- **Conservative Caching**: Use shorter TTLs for "latest" data to reduce re-org impact
-- **Memory Efficient**: Only track recent blocks within the configured depth per chain
+# Run tests with coverage
+go test -v -race -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
 
-This is especially important for:
+# Run specific test packages
+go test ./internal/backend -v
+go test ./internal/router -v
+```
 
-- High-frequency trading applications
-- Time-sensitive DeFi operations
-- Multi-chain applications
-- Any application requiring data consistency
+### CI/CD
 
-**No additional configuration needed** - re-org protection is automatically enabled when health monitoring is enabled. The `max_reorg_depth` setting in the `[cache]` section controls how many recent blocks to track per chain.
+This project uses GitHub Actions for continuous integration. The following workflows are configured:
+
+- **Tests** (`.github/workflows/test.yml`): Runs tests on every push and pull request
+- **CI** (`.github/workflows/ci.yml`): Comprehensive CI pipeline including linting, static analysis, and multi-platform builds
+- **Security** (`.github/workflows/security.yml`): Security scanning including vulnerability checks and secret detection
+
+All workflows run automatically on:
+
+- Push to `main` or `master` branches
+- Pull requests to `main` or `master` branches
+- Security scans also run weekly via cron schedule
+
+### Code Quality
+
+The CI pipeline includes:
+
+- **Linting**: Uses `golint` to check code style
+- **Static Analysis**: Uses `staticcheck` for advanced static analysis
+- **Race Detection**: Tests run with `-race` flag to detect race conditions
+- **Security Scanning**: Uses `govulncheck` and `gosec` for vulnerability detection
+- **Secret Detection**: Uses `trufflehog` to detect accidentally committed secrets

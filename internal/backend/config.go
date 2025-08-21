@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,14 +16,17 @@ import (
 )
 
 var reservedKeys = map[string]bool{
-	"rapier":      true,
-	"health":      true,
-	"performance": true,
-	"batch":       true,
-	"cache":       true,
+	"sabre":         true,
+	"health":        true,
+	"performance":   true,
+	"subscriptions": true,
+	"batch":         true,
+	"cache":         true,
+	"listen":        true,
+	"max_attempts":  true,
 }
 
-type RapierConfig struct {
+type SabreConfig struct {
 	Listen      string `toml:"listen"`
 	MaxAttempts int    `toml:"max_attempts"`
 }
@@ -38,7 +42,6 @@ type HealthConfig struct {
 
 type PerformanceConfig struct {
 	Timeout              time.Duration `toml:"timeout_ms"`
-	TTLBlock             time.Duration `toml:"ttl_block_ms"`
 	Samples              int           `toml:"samples"`
 	Gamma                float64       `toml:"gamma"`
 	MaxIdleConns         int           `toml:"max_idle_conns"`
@@ -49,6 +52,18 @@ type PerformanceConfig struct {
 	MaxConcurrentStreams int           `toml:"max_concurrent_streams"`
 	EnableCompression    bool          `toml:"enable_compression"`
 	CompressionLevel     int           `toml:"compression_level"`
+}
+
+type SubscriptionsConfig struct {
+	TTLBlock                      time.Duration `toml:"ttl_block_ms"`
+	MaxConnectionsPerBackend      int           `toml:"max_connections_per_backend"`
+	MaxSubscriptionsPerConnection int           `toml:"max_subscriptions_per_connection"`
+	PingInterval                  time.Duration `toml:"ping_interval_ms"`
+	PongWait                      time.Duration `toml:"pong_wait_ms"`
+	WriteWait                     time.Duration `toml:"write_wait_ms"`
+	ReadWait                      time.Duration `toml:"read_wait_ms"`
+	EnableCompression             bool          `toml:"enable_compression"`
+	MaxMessageSize                int64         `toml:"max_message_size"`
 }
 
 type BatchConfig struct {
@@ -69,14 +84,17 @@ type chainOnly struct {
 }
 
 type Config struct {
-	Rapier         RapierConfig
+	Sabre          SabreConfig
 	Health         HealthConfig
 	Performance    PerformanceConfig
+	Subscriptions  SubscriptionsConfig
 	Batch          BatchConfig
 	Cache          CacheConfig
-	Backends       []Backend
+	Backends       []*Backend
 	BackendsCt     map[string]int
 	BatchProcessor *BatchProcessor
+	HasWebSocket   bool
+	Stream         *Stream
 }
 
 func ParseConfig(path string) Config {
@@ -91,19 +109,40 @@ func ParseConfig(path string) Config {
 		log.Fatalf("parsing config file: %v", err)
 	}
 
-	if len(raw) <= len(reservedKeys) {
-		log.Fatal("no backends configured, at least one backend must be defined")
+	// Check for backends after parsing all sections
+	hasBackends := false
+	for key := range raw {
+		if !reservedKeys[key] {
+			hasBackends = true
+			break
+		}
+	}
+	if !hasBackends {
+		panic("no backends configured, at least one backend must be defined")
 	}
 
 	var cfg Config
-	if s, ok := raw["rapier"]; ok {
-		var sc RapierConfig
+	if s, ok := raw["sabre"]; ok {
+		var sc SabreConfig
 		raw, _ := toml.Marshal(s)
 		_ = toml.Unmarshal(raw, &sc)
-		cfg.Rapier = sc
+		cfg.Sabre = sc
 	}
-	if cfg.Rapier.Listen == "" {
-		cfg.Rapier.Listen = ":3000"
+
+	// Handle top-level sabre config as well
+	if listen, ok := raw["listen"]; ok {
+		if listenStr, ok := listen.(string); ok {
+			cfg.Sabre.Listen = listenStr
+		}
+	}
+	if maxAttempts, ok := raw["max_attempts"]; ok {
+		if maxAttemptsInt, ok := maxAttempts.(int64); ok {
+			cfg.Sabre.MaxAttempts = int(maxAttemptsInt)
+		}
+	}
+
+	if cfg.Sabre.Listen == "" {
+		cfg.Sabre.Listen = ":3000"
 	}
 
 	if h, ok := raw["health"]; ok {
@@ -111,10 +150,14 @@ func ParseConfig(path string) Config {
 		raw, _ := toml.Marshal(h)
 		_ = toml.Unmarshal(raw, &hc)
 		if hc.TTLCheck <= 0 {
-			hc.TTLCheck = 1000
+			hc.TTLCheck = 1000 * time.Millisecond
+		} else {
+			hc.TTLCheck = hc.TTLCheck * time.Millisecond
 		}
 		if hc.Timeout <= 0 {
-			hc.Timeout = 1500
+			hc.Timeout = 1500 * time.Millisecond
+		} else {
+			hc.Timeout = hc.Timeout * time.Millisecond
 		}
 		if hc.FailsToDown <= 0 {
 			hc.FailsToDown = 2
@@ -127,6 +170,16 @@ func ParseConfig(path string) Config {
 		}
 
 		cfg.Health = hc
+	} else {
+		// Set health defaults when section is missing
+		cfg.Health = HealthConfig{
+			Enabled:      true,
+			TTLCheck:     1000 * time.Millisecond,
+			Timeout:      1500 * time.Millisecond,
+			FailsToDown:  2,
+			PassesToUp:   2,
+			SampleMethod: "eth_blockNumber",
+		}
 	}
 
 	if p, ok := raw["performance"]; ok {
@@ -134,10 +187,9 @@ func ParseConfig(path string) Config {
 		raw, _ := toml.Marshal(p)
 		_ = toml.Unmarshal(raw, &pc)
 		if pc.Timeout <= 0 {
-			pc.Timeout = 2000
-		}
-		if pc.TTLBlock <= 0 {
-			pc.TTLBlock = 13000
+			pc.Timeout = 2000 * time.Millisecond
+		} else {
+			pc.Timeout = pc.Timeout * time.Millisecond
 		}
 		if pc.Samples <= 0 {
 			pc.Samples = 100
@@ -154,6 +206,8 @@ func ParseConfig(path string) Config {
 		}
 		if pc.IdleConnTimeout <= 0 {
 			pc.IdleConnTimeout = 90 * time.Second
+		} else {
+			pc.IdleConnTimeout = pc.IdleConnTimeout * time.Millisecond
 		}
 		if pc.MaxConcurrentStreams <= 0 {
 			pc.MaxConcurrentStreams = 250
@@ -163,6 +217,77 @@ func ParseConfig(path string) Config {
 		}
 
 		cfg.Performance = pc
+	} else {
+		// Set performance defaults when section is missing
+		cfg.Performance = PerformanceConfig{
+			Timeout:              2000 * time.Millisecond,
+			Samples:              100,
+			Gamma:                0.9,
+			MaxIdleConns:         8192,
+			MaxIdleConnsPerHost:  2048,
+			IdleConnTimeout:      90 * time.Second,
+			DisableKeepAlives:    false,
+			EnableHTTP2:          true,
+			MaxConcurrentStreams: 250,
+			EnableCompression:    true,
+			CompressionLevel:     6,
+		}
+	}
+
+	if s, ok := raw["subscriptions"]; ok {
+		var sc SubscriptionsConfig
+		raw, _ := toml.Marshal(s)
+		_ = toml.Unmarshal(raw, &sc)
+
+		// Set WebSocket defaults
+		if sc.MaxConnectionsPerBackend <= 0 {
+			sc.MaxConnectionsPerBackend = 100
+		}
+		if sc.MaxSubscriptionsPerConnection <= 0 {
+			sc.MaxSubscriptionsPerConnection = 50
+		}
+		if sc.PingInterval <= 0 {
+			sc.PingInterval = 30 * time.Second
+		} else {
+			sc.PingInterval = sc.PingInterval * time.Millisecond
+		}
+		if sc.PongWait <= 0 {
+			sc.PongWait = 10 * time.Second
+		} else {
+			sc.PongWait = sc.PongWait * time.Millisecond
+		}
+		if sc.WriteWait <= 0 {
+			sc.WriteWait = 10 * time.Second
+		} else {
+			sc.WriteWait = sc.WriteWait * time.Millisecond
+		}
+		if sc.ReadWait <= 0 {
+			sc.ReadWait = 60 * time.Second
+		} else {
+			sc.ReadWait = sc.ReadWait * time.Millisecond
+		}
+		if sc.MaxMessageSize <= 0 {
+			sc.MaxMessageSize = 1048576 // 1MB
+		}
+		if sc.TTLBlock <= 0 {
+			sc.TTLBlock = 13000 * time.Millisecond
+		} else {
+			sc.TTLBlock = sc.TTLBlock * time.Millisecond
+		}
+
+		cfg.Subscriptions = sc
+	} else {
+		cfg.Subscriptions = SubscriptionsConfig{
+			MaxConnectionsPerBackend:      100,
+			MaxSubscriptionsPerConnection: 50,
+			PingInterval:                  30 * time.Second,
+			PongWait:                      10 * time.Second,
+			WriteWait:                     10 * time.Second,
+			ReadWait:                      60 * time.Second,
+			EnableCompression:             true,
+			MaxMessageSize:                1048576, // 1MB
+			TTLBlock:                      13000 * time.Millisecond,
+		}
 	}
 
 	if b, ok := raw["batch"]; ok {
@@ -176,6 +301,8 @@ func ParseConfig(path string) Config {
 		}
 		if bc.MaxBatchWaitTime <= 0 {
 			bc.MaxBatchWaitTime = 50 * time.Millisecond
+		} else {
+			bc.MaxBatchWaitTime = bc.MaxBatchWaitTime * time.Millisecond
 		}
 		if bc.MaxBatchWorkers <= 0 {
 			bc.MaxBatchWorkers = 4
@@ -190,6 +317,14 @@ func ParseConfig(path string) Config {
 				bc.MaxBatchWorkers,
 			)
 		}
+	} else {
+		// Set batch defaults when section is missing
+		cfg.Batch = BatchConfig{
+			Enabled:          false,
+			MaxBatchSize:     10,
+			MaxBatchWaitTime: 50 * time.Millisecond,
+			MaxBatchWorkers:  4,
+		}
 	}
 
 	if c, ok := raw["cache"]; ok {
@@ -197,7 +332,7 @@ func ParseConfig(path string) Config {
 		raw, _ := toml.Marshal(c)
 		_ = toml.Unmarshal(raw, &cc)
 		if cc.Path == "" {
-			cc.Path = "./.data/rapier"
+			cc.Path = "./.data/sabre"
 		}
 		if cc.MemEntries <= 0 {
 			cc.MemEntries = 100_000
@@ -206,10 +341,14 @@ func ParseConfig(path string) Config {
 			log.Fatal("cache is enabled but no path is configured")
 		}
 		if cc.TTLLatest <= 0 {
-			cc.TTLLatest = 250
+			cc.TTLLatest = 250 * time.Millisecond
+		} else {
+			cc.TTLLatest = cc.TTLLatest * time.Millisecond
 		}
 		if cc.TTLBlock <= 0 {
-			cc.TTLBlock = 86_400_000
+			cc.TTLBlock = 86_400_000 * time.Millisecond
+		} else {
+			cc.TTLBlock = cc.TTLBlock * time.Millisecond
 		}
 
 		// Set re-org protection defaults
@@ -220,19 +359,26 @@ func ParseConfig(path string) Config {
 		if cc.Clean {
 			p := filepath.Clean(cc.Path)
 			if p == "" || p == "." || p == "/" {
-				log.Fatalf("refusing to clean unsafe cache path: %q", p)
+				panic(fmt.Sprintf("refusing to clean unsafe cache path: %q", p))
 			}
 			if err := os.RemoveAll(p); err != nil {
-				log.Fatalf("failed to clean cache path %q: %v", p, err)
+				panic(fmt.Sprintf("failed to clean cache path %q: %v", p, err))
 			}
 			if err := os.MkdirAll(p, 0755); err != nil {
-				log.Fatalf("failed to create cache path %q: %v", p, err)
+				panic(fmt.Sprintf("failed to create cache path %q: %v", p, err))
 			}
 		}
 		cfg.Cache = cc
 	} else {
+		// Set cache defaults when section is missing
 		cfg.Cache = CacheConfig{
-			Enabled: false,
+			Enabled:       false,
+			Path:          "./.data/sabre",
+			MemEntries:    100_000,
+			TTLLatest:     250 * time.Millisecond,
+			TTLBlock:      86_400_000 * time.Millisecond,
+			Clean:         false,
+			MaxReorgDepth: 100,
 		}
 	}
 
@@ -264,7 +410,7 @@ func ParseConfig(path string) Config {
 				log.Fatalf("parsing chain config for %s: %v", provName, err)
 			}
 			if c.URL == "" {
-				log.Fatalf("backend %s chain %s has no URL configured", provName, chainName)
+				panic(fmt.Sprintf("backend %s chain %s has no URL configured", provName, chainName))
 			}
 
 			baseURL := c.URL
@@ -312,18 +458,18 @@ func ParseConfig(path string) Config {
 
 				u, err := url.Parse(chainURL)
 				if err != nil {
-					log.Fatalf("parsing URL for backend %s chain %s: %v", provName, chain, err)
+					panic(fmt.Sprintf("parsing URL for backend %s chain %s: %v", provName, chain, err))
 				}
 
 				var wsu *url.URL
 				if chainWSURL != "" {
 					wsu, err = url.Parse(chainWSURL)
 					if err != nil {
-						log.Fatalf("parsing WS URL for backend %s chain %s: %v", provName, chain, err)
+						panic(fmt.Sprintf("parsing WS URL for backend %s chain %s: %v", provName, chain, err))
 					}
 				}
 
-				cfg.Backends = append(cfg.Backends, Backend{
+				cfg.Backends = append(cfg.Backends, &Backend{
 					Name:    provName,
 					Chain:   chain,
 					URL:     u,
@@ -337,11 +483,11 @@ func ParseConfig(path string) Config {
 	}
 
 	if len(cfg.Backends) == 0 {
-		log.Fatal("no backends configured")
+		panic("no backends configured")
 	}
 
-	if cfg.Rapier.MaxAttempts <= 0 {
-		cfg.Rapier.MaxAttempts = len(cfg.Backends)
+	if cfg.Sabre.MaxAttempts <= 0 {
+		cfg.Sabre.MaxAttempts = len(cfg.Backends)
 	}
 
 	for i := range cfg.Backends {
@@ -349,6 +495,16 @@ func ParseConfig(path string) Config {
 		cfg.Backends[i].HealthPassStreak.Store(0)
 		cfg.Backends[i].HealthFailStreak.Store(0)
 	}
+
+	hasWebSocket := false
+	for i := range cfg.Backends {
+		if cfg.Backends[i].WSURL != nil {
+			hasWebSocket = true
+			break
+		}
+	}
+
+	cfg.HasWebSocket = hasWebSocket
 
 	return cfg
 }
