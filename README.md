@@ -25,7 +25,7 @@ Download the latest release for your platform from the [releases page](https://g
 For development, you can run directly with:
 
 ```bash
-go run ./cmd/sabre
+go run ./cmd/sabre/main.go
 ```
 
 ## Quickstart
