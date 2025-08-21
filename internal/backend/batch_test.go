@@ -58,11 +58,15 @@ func TestBatchProcessor_AddRequest(t *testing.T) {
 		t.Error("expected response channel to be returned")
 	}
 
-	if len(bp.batches) != 1 {
-		t.Errorf("expected 1 batch, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 1 {
+		t.Errorf("expected 1 batch, got %d", bp.GetBatchCount())
 	}
 
+	time.Sleep(10 * time.Millisecond)
+
+	bp.mu.Lock()
 	batch, exists := bp.batches[backendURL]
+	bp.mu.Unlock()
 	if !exists {
 		t.Error("expected batch to exist for backend URL")
 	}
@@ -100,8 +104,8 @@ func TestBatchProcessor_MaxBatchSize(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if len(bp.batches) != 0 {
-		t.Errorf("expected 0 batches after reaching max size, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 0 {
+		t.Errorf("expected 0 batches after reaching max size, got %d", bp.GetBatchCount())
 	}
 }
 
@@ -132,12 +136,15 @@ func TestBatchProcessor_MultipleBackends(t *testing.T) {
 		}
 	}
 
-	if len(bp.batches) != 3 {
-		t.Errorf("expected 3 batches, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 3 {
+		t.Errorf("expected 3 batches, got %d", bp.GetBatchCount())
 	}
 
 	for _, url := range backendURLs {
-		if _, exists := bp.batches[url]; !exists {
+		bp.mu.Lock()
+		_, exists := bp.batches[url]
+		bp.mu.Unlock()
+		if !exists {
 			t.Errorf("expected batch to exist for %s", url)
 		}
 	}
@@ -193,14 +200,14 @@ func TestBatchProcessor_FlushAll(t *testing.T) {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
 
-	if len(bp.batches) != 1 {
-		t.Errorf("expected 1 batch before flush, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 1 {
+		t.Errorf("expected 1 batch before flush, got %d", bp.GetBatchCount())
 	}
 
 	bp.FlushAll()
 
-	if len(bp.batches) != 0 {
-		t.Errorf("expected 0 batches after flush, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 0 {
+		t.Errorf("expected 0 batches after flush, got %d", bp.GetBatchCount())
 	}
 
 	select {
@@ -304,11 +311,13 @@ func TestBatchProcessor_RequestMatching(t *testing.T) {
 		t.Errorf("expected no error adding request 2, got %v", err)
 	}
 
-	if len(bp.batches) != 1 {
-		t.Errorf("expected 1 batch for same backend, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 1 {
+		t.Errorf("expected 1 batch for same backend, got %d", bp.GetBatchCount())
 	}
 
+	bp.mu.Lock()
 	batch, exists := bp.batches[backendURL]
+	bp.mu.Unlock()
 	if !exists {
 		t.Fatal("expected batch to exist for backend")
 	}
@@ -341,8 +350,8 @@ func TestBatchProcessor_EmptyBatch(t *testing.T) {
 
 	bp.FlushAll()
 
-	if len(bp.batches) != 0 {
-		t.Errorf("expected 0 batches, got %d", len(bp.batches))
+	if bp.GetBatchCount() != 0 {
+		t.Errorf("expected 0 batches, got %d", bp.GetBatchCount())
 	}
 }
 

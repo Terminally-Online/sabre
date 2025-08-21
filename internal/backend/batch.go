@@ -1,10 +1,10 @@
 package backend
 
 import (
-	"maps"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"sync"
 	"time"
@@ -203,4 +203,10 @@ func (bp *BatchProcessor) FlushAll() {
 	for _, batch := range batches {
 		go bp.processBatch(batch)
 	}
+}
+
+func (bp *BatchProcessor) GetBatchCount() int {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	return len(bp.batches)
 }
