@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"sync"
@@ -189,9 +190,18 @@ func (bp *BatchProcessor) sendBatch(backendURL string, requests []BatchRequest) 
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read batch response: %w", err)
+	}
+
 	var responses []BatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&responses); err != nil {
-		return nil, fmt.Errorf("failed to decode batch response: %w", err)
+	if err := json.Unmarshal(body, &responses); err != nil {
+		var singleResponse BatchResponse
+		if err := json.Unmarshal(body, &singleResponse); err != nil {
+			return nil, fmt.Errorf("failed to decode batch response: %w", err)
+		}
+		responses = []BatchResponse{singleResponse}
 	}
 
 	return responses, nil
