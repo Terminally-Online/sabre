@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  sabre:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - sabre-data:/app/.data
+    restart: unless-stopped
+
+volumes:
+  sabre-data:
