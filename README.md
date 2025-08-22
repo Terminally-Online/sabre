@@ -50,7 +50,7 @@ docker run \
   sabre:local
 ```
 
-The above command will create a container with `sabre` running and listening on port 3000 along with a volume called `sabre-data` that will store the cache database.
+The above command will create a container with `sabre` running and listening on port 3000.
 
 The above command uses `sabre:local` which is the image you built from source. If you want to use the GitHub Container Registry image, you can use `ghcr.io/terminally-online/sabre:latest`.
 

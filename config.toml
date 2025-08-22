@@ -233,7 +233,7 @@ path = "./.data/sabre"
 # Set this to false if you want to preserve all cached data across restarts,
 # which can be beneficial for production environments where you want to maintain
 # cache performance and reduce initial load times.
-clean = true
+clean = false
 # Maximum depth of re-orgs to protect against (in blocks).
 # This determines:
 # 1. How many recent block hashes to keep in memory for comparison

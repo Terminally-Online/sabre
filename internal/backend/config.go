@@ -359,17 +359,19 @@ func ParseConfig(path string) Config {
 			cc.MaxReorgDepth = 100
 		}
 
+		p := filepath.Clean(cc.Path)
+		if p == "" || p == "." || p == "/" {
+			panic(fmt.Sprintf("refusing to use unsafe cache path: %q", p))
+		}
+
 		if cc.Clean {
-			p := filepath.Clean(cc.Path)
-			if p == "" || p == "." || p == "/" {
-				panic(fmt.Sprintf("refusing to clean unsafe cache path: %q", p))
-			}
 			if err := os.RemoveAll(p); err != nil {
 				panic(fmt.Sprintf("failed to clean cache path %q: %v", p, err))
 			}
-			if err := os.MkdirAll(p, 0755); err != nil {
-				panic(fmt.Sprintf("failed to create cache path %q: %v", p, err))
-			}
+		}
+
+		if err := os.MkdirAll(p, 0755); err != nil {
+			panic(fmt.Sprintf("failed to create cache path %q: %v", p, err))
 		}
 		cfg.Cache = cc
 	} else {
