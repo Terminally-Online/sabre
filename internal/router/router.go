@@ -257,13 +257,11 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 								data, _ = json.Marshal(mergedResponses)
 							}
 
-							// Extract block info and cache each response
 							for i, respBytes := range batchResponses {
 								if blockNum, blockHash := backend.ExtractBlockInfo(respBytes); blockNum > 0 {
 									cstore.UpdateLatestBlock(chain, blockNum, blockHash, respBytes)
 								}
 
-								// Cache each individual response
 								if i < len(originalReqs) {
 									reqItem := originalReqs[i]
 									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
@@ -375,9 +373,6 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		IdleTimeout:       idleTimeout,
 		BaseContext:       func(_ net.Listener) context.Context { return context.Background() },
 	}
-
-	/* stop := animate() */
-	/* defer stop() */
 
 	return srv
 }
