@@ -82,8 +82,35 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		_ = r.Body.Close()
 		body := buf.Bytes()
 
+		bodyTrimmed := bytes.TrimSpace(body)
+		isBatch := len(bodyTrimmed) > 0 && bodyTrimmed[0] == '['
+
 		var req rpcReq
-		if err := json.Unmarshal(body, &req); err != nil {
+		var reqs []rpcReq
+		var parseErr error
+
+		if isBatch {
+			parseErr = json.Unmarshal(body, &reqs)
+			if parseErr == nil && len(reqs) == 0 {
+				errorResponse := map[string]any{
+					"jsonrpc": "2.0",
+					"id":      nil,
+					"error": map[string]any{
+						"code":    -32600,
+						"message": "Invalid Request",
+					},
+				}
+				errorData, _ := json.Marshal(errorResponse)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write(errorData)
+				return
+			}
+		} else {
+			parseErr = json.Unmarshal(body, &req)
+		}
+
+		if parseErr != nil {
 			errorResponse := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      nil,
@@ -99,25 +126,58 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			return
 		}
 
-		var batchReq backend.BatchRequest
-		if cfg.Batch.Enabled {
-			batchReq = backend.BatchRequest{
-				JSONRPC: req.JSONRPC,
-				ID:      req.ID,
-				Method:  req.Method,
-				Params:  req.Params,
-			}
-		}
+		var originalReqs []rpcReq
+		var cachedResponses []json.RawMessage
+		var uncachedIndices []int
 
-		key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
-		ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
-		if ttl > 0 {
-			if cached, ok := cstore.Get(key); ok {
+		if !isBatch {
+			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
+			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
+			if ttl > 0 {
+				if cached, ok := cstore.Get(key); ok {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(cached)
+					return
+				}
+			}
+		} else {
+			originalReqs = make([]rpcReq, len(reqs))
+			copy(originalReqs, reqs)
+
+			cachedResponses = make([]json.RawMessage, len(reqs))
+			uncachedIndices = make([]int, 0, len(reqs))
+			uncachedReqs := make([]rpcReq, 0, len(reqs))
+
+			for i, reqItem := range reqs {
+				key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
+				ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
+				if ttl > 0 {
+					if cached, ok := cstore.Get(key); ok {
+						cachedResponses[i] = cached
+						continue
+					}
+				}
+				uncachedIndices = append(uncachedIndices, i)
+				uncachedReqs = append(uncachedReqs, reqItem)
+			}
+
+			if len(uncachedReqs) == 0 {
+				responses := make([]json.RawMessage, len(reqs))
+				for i, cached := range cachedResponses {
+					if cached != nil {
+						responses[i] = cached
+					}
+				}
+				data, _ := json.Marshal(responses)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(cached)
+				_, _ = w.Write(data)
 				return
 			}
+
+			reqs = uncachedReqs
+			body, _ = json.Marshal(reqs)
 		}
 
 		var (
@@ -132,7 +192,35 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			bk, err = lb.Pick(r.Context(), chain, "http")
 			if err != nil {
 				if attempt == cfg.Sabre.MaxAttempts {
-					http.Error(w, "no available backends: "+err.Error(), http.StatusServiceUnavailable)
+					if isBatch {
+						batchSize := len(reqs)
+						if len(originalReqs) > 0 {
+							batchSize = len(originalReqs)
+						}
+						errorResponses := make([]map[string]any, batchSize)
+						for i := range errorResponses {
+							var reqID json.RawMessage
+							if i < len(originalReqs) {
+								reqID = originalReqs[i].ID
+							} else if i < len(reqs) {
+								reqID = reqs[i].ID
+							}
+							errorResponses[i] = map[string]any{
+								"jsonrpc": "2.0",
+								"id":      reqID,
+								"error": map[string]any{
+									"code":    -32603,
+									"message": "Internal error: no available backends: " + err.Error(),
+								},
+							}
+						}
+						errorData, _ := json.Marshal(errorResponses)
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusServiceUnavailable)
+						_, _ = w.Write(errorData)
+					} else {
+						http.Error(w, "no available backends: "+err.Error(), http.StatusServiceUnavailable)
+					}
 					return
 				}
 				continue
@@ -141,7 +229,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			start := time.Now()
 
 			if cfg.Batch.Enabled {
-				status, hdrs, data, err = processBatchRequest(cfg.BatchProcessor, bk, batchReq, req, cfg.Performance.Timeout, r, body)
+				status, hdrs, data, err = processBatchRequest(cfg.BatchProcessor, bk, isBatch, req, reqs, cfg.Performance.Timeout, r, body)
 			} else {
 				status, hdrs, data, err = sendTo(r.Context(), bk, r.Header, body)
 			}
@@ -149,21 +237,92 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			if err == nil && !isRetryableStatus(status) {
 				lb.UpdateLatency(bk, time.Since(start), cfg.Performance)
 				if status == http.StatusOK {
-					if blockNum, blockHash := backend.ExtractBlockInfo(data); blockNum > 0 {
-						cstore.UpdateLatestBlock(chain, blockNum, blockHash, data)
+					if isBatch {
+						var batchResponses []json.RawMessage
+						if err := json.Unmarshal(data, &batchResponses); err == nil {
+							if len(cachedResponses) > 0 && len(uncachedIndices) > 0 {
+								mergedResponses := make([]json.RawMessage, len(originalReqs))
+								for i, cached := range cachedResponses {
+									if cached != nil {
+										mergedResponses[i] = cached
+									}
+								}
+								for idx, resp := range batchResponses {
+									if idx < len(uncachedIndices) {
+										originalIdx := uncachedIndices[idx]
+										mergedResponses[originalIdx] = resp
+									}
+								}
+								batchResponses = mergedResponses
+								data, _ = json.Marshal(mergedResponses)
+							}
+
+							// Extract block info and cache each response
+							for i, respBytes := range batchResponses {
+								if blockNum, blockHash := backend.ExtractBlockInfo(respBytes); blockNum > 0 {
+									cstore.UpdateLatestBlock(chain, blockNum, blockHash, respBytes)
+								}
+
+								// Cache each individual response
+								if i < len(originalReqs) {
+									reqItem := originalReqs[i]
+									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
+									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
+									if ttl > 0 {
+										cstore.Put(key, respBytes, ttl, chain)
+									}
+								}
+							}
+						}
+					} else {
+						if blockNum, blockHash := backend.ExtractBlockInfo(data); blockNum > 0 {
+							cstore.UpdateLatestBlock(chain, blockNum, blockHash, data)
+						}
 					}
 				}
 				break
 			}
 
 			if attempt == cfg.Sabre.MaxAttempts && err != nil {
-				http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+				if isBatch {
+					batchSize := len(reqs)
+					if len(originalReqs) > 0 {
+						batchSize = len(originalReqs)
+					}
+					errorResponses := make([]map[string]any, batchSize)
+					for i := range errorResponses {
+						var reqID json.RawMessage
+						if i < len(originalReqs) {
+							reqID = originalReqs[i].ID
+						} else if i < len(reqs) {
+							reqID = reqs[i].ID
+						}
+						errorResponses[i] = map[string]any{
+							"jsonrpc": "2.0",
+							"id":      reqID,
+							"error": map[string]any{
+								"code":    -32603,
+								"message": "Internal error: " + err.Error(),
+							},
+						}
+					}
+					errorData, _ := json.Marshal(errorResponses)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = w.Write(errorData)
+				} else {
+					http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+				}
 				return
 			}
 		}
 
-		if ttl > 0 && status == http.StatusOK {
-			cstore.Put(key, data, ttl, chain)
+		if !isBatch && status == http.StatusOK {
+			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
+			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
+			if ttl > 0 {
+				cstore.Put(key, data, ttl, chain)
+			}
 		}
 
 		writeHopSafeHeaders(w, hdrs)
@@ -282,22 +441,62 @@ func sendTo(ctx context.Context, bk *backend.Backend, inHdr http.Header, body []
 	return resp.StatusCode, hdr, data, nil
 }
 
-func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Backend, batchReq backend.BatchRequest, req rpcReq, timeout time.Duration, r *http.Request, body []byte) (status int, hdrs http.Header, data []byte, err error) {
-	responseChan, err := batchProcessor.AddRequest(bk.URL.String(), batchReq)
-	if err != nil {
-		return sendTo(r.Context(), bk, r.Header, body)
-	}
+func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Backend, isBatch bool, req rpcReq, reqs []rpcReq, timeout time.Duration, r *http.Request, body []byte) (status int, hdrs http.Header, data []byte, err error) {
+	if isBatch {
+		responseChans := make([]<-chan backend.BatchResponse, len(reqs))
+		for i, reqItem := range reqs {
+			batchReq := backend.BatchRequest{
+				JSONRPC: reqItem.JSONRPC,
+				ID:      reqItem.ID,
+				Method:  reqItem.Method,
+				Params:  reqItem.Params,
+			}
+			responseChans[i], err = batchProcessor.AddRequest(bk.URL.String(), batchReq)
+			if err != nil {
+				return sendTo(r.Context(), bk, r.Header, body)
+			}
+		}
 
-	select {
-	case resp := <-responseChan:
-		data, err = json.Marshal(resp)
+		responses := make([]backend.BatchResponse, len(reqs))
+		for i, ch := range responseChans {
+			select {
+			case resp := <-ch:
+				responses[i] = resp
+			case <-time.After(timeout):
+				return 0, nil, nil, fmt.Errorf("batch request timeout")
+			}
+		}
+
+		data, err = json.Marshal(responses)
 		if err != nil {
 			return 0, nil, nil, fmt.Errorf("failed to marshal batch response: %w", err)
 		}
 		hdrs = make(http.Header)
 		hdrs.Set("Content-Type", "application/json")
 		return http.StatusOK, hdrs, data, nil
-	case <-time.After(timeout):
-		return 0, nil, nil, fmt.Errorf("batch request timeout")
+	} else {
+		batchReq := backend.BatchRequest{
+			JSONRPC: req.JSONRPC,
+			ID:      req.ID,
+			Method:  req.Method,
+			Params:  req.Params,
+		}
+		responseChan, err := batchProcessor.AddRequest(bk.URL.String(), batchReq)
+		if err != nil {
+			return sendTo(r.Context(), bk, r.Header, body)
+		}
+
+		select {
+		case resp := <-responseChan:
+			data, err = json.Marshal(resp)
+			if err != nil {
+				return 0, nil, nil, fmt.Errorf("failed to marshal batch response: %w", err)
+			}
+			hdrs = make(http.Header)
+			hdrs.Set("Content-Type", "application/json")
+			return http.StatusOK, hdrs, data, nil
+		case <-time.After(timeout):
+			return 0, nil, nil, fmt.Errorf("batch request timeout")
+		}
 	}
 }

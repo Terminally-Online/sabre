@@ -624,3 +624,157 @@ func TestRouter_ConcurrentRequests(t *testing.T) {
 		<-done
 	}
 }
+
+func TestRouter_JSONRPCBatchRequest(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Cache.Enabled = false
+
+	storeCfg := backend.CacheConfig{
+		Enabled:       false,
+		Path:          getUniqueTestCachePath(t),
+		MemEntries:    1000,
+		TTLLatest:     250 * time.Millisecond,
+		TTLBlock:      24 * time.Hour,
+		Clean:         true,
+		MaxReorgDepth: 100,
+	}
+	store, err := backend.Open(storeCfg)
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer cleanupTestStore(t, store)
+
+	mockBatchResponse := `[{"jsonrpc":"2.0","id":1,"result":"0x1234"},{"jsonrpc":"2.0","id":2,"result":"0x1"}]`
+	backend1 := cfg.Backends[0]
+	backend2 := cfg.Backends[1]
+
+	backend1.HealthUp.Store(true)
+	backend2.HealthUp.Store(true)
+
+	mockClient1 := backend1.Client.Transport.(*backend.MockHTTPClient)
+	mockClient2 := backend2.Client.Transport.(*backend.MockHTTPClient)
+
+	mockClient1.ClearRequests()
+	mockClient2.ClearRequests()
+
+	mockClient1.SetResponse("https://api1.example.com", backend.MockResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(mockBatchResponse),
+	})
+	mockClient2.SetResponse("https://api2.example.com", backend.MockResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(mockBatchResponse),
+	})
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	batchRequestBody := []map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []any{}},
+		{"jsonrpc": "2.0", "id": 2, "method": "eth_chainId", "params": []any{}},
+	}
+
+	bodyBytes, _ := json.Marshal(batchRequestBody)
+	req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d. Response body: %s", w.Code, w.Body.String())
+	}
+
+	responseBody := w.Body.String()
+	if !strings.Contains(responseBody, "0x1234") {
+		t.Errorf("expected response to contain '0x1234', got %s", responseBody)
+	}
+	if !strings.Contains(responseBody, "0x1") {
+		t.Errorf("expected response to contain '0x1', got %s", responseBody)
+	}
+
+	if !strings.HasPrefix(strings.TrimSpace(responseBody), "[") {
+		t.Errorf("expected batch response to be an array, got %s", responseBody)
+	}
+
+	requests1 := mockClient1.GetRequests()
+	requests2 := mockClient2.GetRequests()
+	totalRequests := len(requests1) + len(requests2)
+
+	if totalRequests == 0 {
+		t.Errorf("expected request to be made to backend. Response code: %d, Response body: %s", w.Code, w.Body.String())
+	}
+
+	var requests []backend.MockRequest
+	if len(requests1) > 0 {
+		requests = requests1
+	} else if len(requests2) > 0 {
+		requests = requests2
+	}
+
+	if len(requests) > 0 {
+		request := requests[0]
+		if request.Method != "POST" {
+			t.Errorf("expected POST request, got %s", request.Method)
+		}
+		var requestBody []any
+		if err := json.Unmarshal(request.Body, &requestBody); err != nil {
+			t.Errorf("expected batch request body to be an array, got error: %v", err)
+		}
+		if len(requestBody) != 2 {
+			t.Errorf("expected batch request to have 2 items, got %d", len(requestBody))
+		}
+	}
+}
+
+func TestRouter_JSONRPCBatchRequest_EmptyBatch(t *testing.T) {
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	emptyBatch := []any{}
+	bodyBytes, _ := json.Marshal(emptyBatch)
+	req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for empty batch, got %d", w.Code)
+	}
+
+	responseBody := w.Body.String()
+	if !strings.Contains(responseBody, "error") {
+		t.Errorf("expected error response, got %s", responseBody)
+	}
+}
+
+func TestRouter_JSONRPCBatchRequest_InvalidJSON(t *testing.T) {
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	req := httptest.NewRequest("POST", "/ethereum", strings.NewReader("[invalid json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for invalid JSON batch, got %d", w.Code)
+	}
+
+	responseBody := w.Body.String()
+	if !strings.Contains(responseBody, "error") {
+		t.Errorf("expected error response, got %s", responseBody)
+	}
+}
