@@ -41,6 +41,9 @@ COPY --from=builder /app/sabre .
 # Copy config file
 COPY --from=builder /app/config.toml .
 
+# Create cache directory for the application
+RUN mkdir -p .data/sabre
+
 # Change ownership to non-root user
 RUN chown -R sabre:sabre /app
 
