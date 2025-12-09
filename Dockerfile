@@ -28,10 +28,6 @@ FROM alpine:latest
 # Install runtime dependencies
 RUN apk --no-cache add ca-certificates tzdata
 
-# Create non-root user
-RUN addgroup -g 1001 -S sabre && \
-    adduser -u 1001 -S sabre -G sabre
-
 # Set working directory
 WORKDIR /app
 
@@ -41,21 +37,8 @@ COPY --from=builder /app/sabre .
 # Copy config file
 COPY --from=builder /app/config.toml .
 
-# Create cache directory for the application
-RUN mkdir -p .data/sabre
-
-# Change ownership to non-root user
-RUN chown -R sabre:sabre /app
-
-# Switch to non-root user
-USER sabre
-
 # Expose port
 EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
 # Run the application
 ENTRYPOINT ["./sabre"]
