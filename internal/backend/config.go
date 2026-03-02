@@ -84,6 +84,7 @@ type BatchConfig struct {
 	MaxBatchSize     int           `toml:"max_batch_size"`
 	MaxBatchWaitTime time.Duration `toml:"max_batch_wait_ms"`
 	MaxBatchWorkers  int           `toml:"max_batch_workers"`
+	MaxRetries       int           `toml:"max_retries"`
 }
 
 type providerOnly struct {
@@ -340,6 +341,9 @@ func ParseConfig(path string) Config {
 		if bc.MaxBatchWorkers <= 0 {
 			bc.MaxBatchWorkers = 4
 		}
+		if bc.MaxRetries <= 0 {
+			bc.MaxRetries = 2
+		}
 
 		cfg.Batch = bc
 
@@ -348,6 +352,7 @@ func ParseConfig(path string) Config {
 				bc.MaxBatchSize,
 				bc.MaxBatchWaitTime,
 				bc.MaxBatchWorkers,
+				bc.MaxRetries,
 				cfg.Multicall,
 			)
 		}
@@ -357,6 +362,7 @@ func ParseConfig(path string) Config {
 			MaxBatchSize:     10,
 			MaxBatchWaitTime: 50 * time.Millisecond,
 			MaxBatchWorkers:  4,
+			MaxRetries:       2,
 		}
 	}
 

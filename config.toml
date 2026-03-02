@@ -174,6 +174,12 @@ max_batch_wait_ms = 50
 # simultaneously. Higher values increase concurrency but may overwhelm
 # slower backends. 4 workers provide good concurrency without overloading.
 max_batch_workers = 4
+# Maximum retry attempts for transient failures within the batch processor.
+# This controls retries at the HTTP transport level (connection resets, 429s,
+# 5xx responses) before errors propagate to callers. The batch processor uses
+# exponential backoff with jitter between retries. Set to 0 to disable
+# batch-level retries and rely solely on the router's retry loop.
+max_retries = 2
 
 [multicall]
 # Enable Multicall3 aggregation to condense multiple eth_call requests into a single

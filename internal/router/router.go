@@ -392,7 +392,7 @@ func writeHopSafeHeaders(dst http.ResponseWriter, src http.Header) {
 }
 
 func isRetryableStatus(code int) bool {
-	if code == 429 {
+	if code == 429 || code == 408 {
 		return true
 	}
 	return code >= 500 && code != 501 && code != 505
@@ -446,7 +446,7 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 				Method:  reqItem.Method,
 				Params:  reqItem.Params,
 			}
-			responseChans[i], err = batchProcessor.AddRequest(bk.URL.String(), batchReq)
+			responseChans[i], err = batchProcessor.AddRequest(bk.URL.String(), batchReq, bk.Client)
 			if err != nil {
 				return sendTo(r.Context(), bk, r.Header, body)
 			}
@@ -460,6 +460,17 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 			case <-time.After(timeout):
 				return 0, nil, nil, fmt.Errorf("batch request timeout")
 			}
+		}
+
+		allFailed := len(responses) > 0
+		for _, resp := range responses {
+			if resp.Error == nil {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
+			return 0, nil, nil, fmt.Errorf("all %d batch responses returned errors", len(responses))
 		}
 
 		data, err = json.Marshal(responses)
@@ -476,13 +487,16 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 			Method:  req.Method,
 			Params:  req.Params,
 		}
-		responseChan, err := batchProcessor.AddRequest(bk.URL.String(), batchReq)
+		responseChan, err := batchProcessor.AddRequest(bk.URL.String(), batchReq, bk.Client)
 		if err != nil {
 			return sendTo(r.Context(), bk, r.Header, body)
 		}
 
 		select {
 		case resp := <-responseChan:
+			if resp.Error != nil {
+				return 0, nil, nil, fmt.Errorf("batch response error: %v", resp.Error)
+			}
 			data, err = json.Marshal(resp)
 			if err != nil {
 				return 0, nil, nil, fmt.Errorf("failed to marshal batch response: %w", err)

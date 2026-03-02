@@ -8,7 +8,7 @@ import (
 )
 
 func createTestBatchProcessor() *BatchProcessor {
-	return NewBatchProcessor(5, 50*time.Millisecond, 2, MulticallConfig{})
+	return NewBatchProcessor(5, 50*time.Millisecond, 2, 2, MulticallConfig{})
 }
 
 func TestNewBatchProcessor(t *testing.T) {
@@ -50,7 +50,7 @@ func TestBatchProcessor_AddRequest(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req)
+	responseChan, err := bp.AddRequest(backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBatchProcessor_MaxBatchSize(t *testing.T) {
 
 	for i := range 5 {
 		req.ID = json.RawMessage(fmt.Sprintf(`"%d"`, i))
-		responseChan, err := bp.AddRequest(backendURL, req)
+		responseChan, err := bp.AddRequest(backendURL, req, nil)
 		if err != nil {
 			t.Errorf("expected no error adding request %d, got %v", i, err)
 		}
@@ -127,7 +127,7 @@ func TestBatchProcessor_MultipleBackends(t *testing.T) {
 
 	for i, url := range backendURLs {
 		req.ID = json.RawMessage(fmt.Sprintf(`"%d"`, i))
-		responseChan, err := bp.AddRequest(url, req)
+		responseChan, err := bp.AddRequest(url, req, nil)
 		if err != nil {
 			t.Errorf("expected no error adding request to %s, got %v", url, err)
 		}
@@ -151,19 +151,19 @@ func TestBatchProcessor_MultipleBackends(t *testing.T) {
 }
 
 func TestBatchProcessor_ConcurrentWorkers(t *testing.T) {
-	bp := NewBatchProcessor(5, 50*time.Millisecond, 2, MulticallConfig{})
+	bp := NewBatchProcessor(5, 50*time.Millisecond, 2, 2, MulticallConfig{})
 
 	if cap(bp.workers) != 2 {
 		t.Errorf("expected worker pool capacity 2, got %d", cap(bp.workers))
 	}
 
-	bp2 := NewBatchProcessor(5, 50*time.Millisecond, 1, MulticallConfig{})
+	bp2 := NewBatchProcessor(5, 50*time.Millisecond, 1, 2, MulticallConfig{})
 
 	if cap(bp2.workers) != 1 {
 		t.Errorf("expected worker pool capacity 1, got %d", cap(bp2.workers))
 	}
 
-	bp3 := NewBatchProcessor(5, 10*time.Millisecond, 1, MulticallConfig{})
+	bp3 := NewBatchProcessor(5, 10*time.Millisecond, 1, 2, MulticallConfig{})
 
 	if len(bp3.workers) != 0 {
 		t.Errorf("expected empty worker pool initially, got %d", len(bp3.workers))
@@ -195,7 +195,7 @@ func TestBatchProcessor_FlushAll(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req)
+	responseChan, err := bp.AddRequest(backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBatchProcessor_ErrorHandling(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest("invalid-url", req)
+	responseChan, err := bp.AddRequest("invalid-url", req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -252,7 +252,7 @@ func TestBatchProcessor_ErrorHandling(t *testing.T) {
 }
 
 func TestBatchProcessor_TimeoutHandling(t *testing.T) {
-	bp := NewBatchProcessor(1, 10*time.Millisecond, 1, MulticallConfig{})
+	bp := NewBatchProcessor(1, 10*time.Millisecond, 1, 2, MulticallConfig{})
 
 	backendURL := "https://api.example.com"
 	req := BatchRequest{
@@ -262,7 +262,7 @@ func TestBatchProcessor_TimeoutHandling(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req)
+	responseChan, err := bp.AddRequest(backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -301,12 +301,12 @@ func TestBatchProcessor_RequestMatching(t *testing.T) {
 		Params:  json.RawMessage(`["0x123", "latest"]`),
 	}
 
-	responseChan1, err := bp.AddRequest(backendURL, req1)
+	responseChan1, err := bp.AddRequest(backendURL, req1, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request 1, got %v", err)
 	}
 
-	responseChan2, err := bp.AddRequest(backendURL, req2)
+	responseChan2, err := bp.AddRequest(backendURL, req2, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request 2, got %v", err)
 	}
@@ -356,7 +356,7 @@ func TestBatchProcessor_EmptyBatch(t *testing.T) {
 }
 
 func TestBatchProcessor_WorkerReuse(t *testing.T) {
-	bp := NewBatchProcessor(1, 50*time.Millisecond, 1, MulticallConfig{})
+	bp := NewBatchProcessor(1, 50*time.Millisecond, 1, 2, MulticallConfig{})
 
 	if len(bp.workers) != 0 {
 		t.Errorf("expected empty worker pool initially, got %d", len(bp.workers))

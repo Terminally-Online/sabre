@@ -3,10 +3,14 @@ package backend
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math/rand/v2"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +38,7 @@ type BatchProcessor struct {
 	maxBatchSize  int
 	maxWaitTime   time.Duration
 	maxConcurrent int
+	maxRetries    int
 	multicall     MulticallConfig
 
 	batches map[string]*Batch
@@ -43,6 +48,7 @@ type BatchProcessor struct {
 // Batch represents a collection of requests to be sent to a single backend.
 type Batch struct {
 	BackendURL    string
+	Client        *http.Client
 	Requests      []BatchRequest
 	ResponseChans map[string]chan BatchResponse
 	Created       time.Time
@@ -51,11 +57,12 @@ type Batch struct {
 }
 
 // NewBatchProcessor creates a new batch processor with the specified configuration.
-func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int, multicall MulticallConfig) *BatchProcessor {
+func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int, maxRetries int, multicall MulticallConfig) *BatchProcessor {
 	return &BatchProcessor{
 		maxBatchSize:  maxBatchSize,
 		maxWaitTime:   maxWaitTime,
 		maxConcurrent: maxConcurrent,
+		maxRetries:    maxRetries,
 		multicall:     multicall,
 		batches:       make(map[string]*Batch),
 		workers:       make(chan struct{}, maxConcurrent),
@@ -63,7 +70,7 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurren
 }
 
 // AddRequest adds a request to a batch and returns a channel to receive the response.
-func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest) (<-chan BatchResponse, error) {
+func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest, client *http.Client) (<-chan BatchResponse, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -71,6 +78,7 @@ func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest) (<-cha
 	if !exists {
 		batch = &Batch{
 			BackendURL:    backendURL,
+			Client:        client,
 			Requests:      make([]BatchRequest, 0, bp.maxBatchSize),
 			ResponseChans: make(map[string]chan BatchResponse),
 			Created:       time.Now(),
@@ -149,7 +157,7 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 		requests, mapping = aggregateEthCalls(requests, bp.multicall)
 	}
 
-	responses, err := bp.sendBatch(batch.BackendURL, requests)
+	responses, err := bp.sendBatch(batch, requests)
 
 	// Expand multicall responses back into individual responses.
 	if err == nil && mapping != nil {
@@ -201,40 +209,90 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 	}
 }
 
-func (bp *BatchProcessor) sendBatch(backendURL string, requests []BatchRequest) ([]BatchResponse, error) {
+func (bp *BatchProcessor) sendBatch(batch *Batch, requests []BatchRequest) ([]BatchResponse, error) {
 	batchBody, err := json.Marshal(requests)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", backendURL, bytes.NewReader(batchBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create batch request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send batch request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read batch response: %w", err)
+	client := batch.Client
+	if client == nil {
+		client = http.DefaultClient
 	}
 
-	var responses []BatchResponse
-	if err := json.Unmarshal(body, &responses); err != nil {
-		var singleResponse BatchResponse
-		if err := json.Unmarshal(body, &singleResponse); err != nil {
-			return nil, fmt.Errorf("failed to decode batch response: %w", err)
+	var lastErr error
+	for attempt := 0; attempt <= bp.maxRetries; attempt++ {
+		if attempt > 0 {
+			base := time.Duration(50<<uint(attempt-1)) * time.Millisecond
+			jitter := time.Duration(rand.Int64N(int64(base / 2)))
+			time.Sleep(base + jitter)
 		}
-		responses = []BatchResponse{singleResponse}
+
+		req, err := http.NewRequest("POST", batch.BackendURL, bytes.NewReader(batchBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create batch request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send batch request: %w", err)
+			if isTransientError(err) {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read batch response: %w", err)
+			continue
+		}
+
+		if isRetryableHTTPStatus(resp.StatusCode) {
+			lastErr = fmt.Errorf("batch request returned status %d", resp.StatusCode)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("batch request returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var responses []BatchResponse
+		if err := json.Unmarshal(body, &responses); err != nil {
+			var singleResponse BatchResponse
+			if err := json.Unmarshal(body, &singleResponse); err != nil {
+				return nil, fmt.Errorf("failed to decode batch response: %w", err)
+			}
+			responses = []BatchResponse{singleResponse}
+		}
+
+		return responses, nil
 	}
 
-	return responses, nil
+	return nil, lastErr
+}
+
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe")
+}
+
+func isRetryableHTTPStatus(code int) bool {
+	return code == 429 || code == 408 || (code >= 500 && code != 501 && code != 505)
 }
 
 // FlushAll processes all pending batches immediately.
