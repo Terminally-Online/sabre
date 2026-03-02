@@ -175,6 +175,28 @@ max_batch_wait_ms = 50
 # slower backends. 4 workers provide good concurrency without overloading.
 max_batch_workers = 4
 
+[multicall]
+# Enable Multicall3 aggregation to condense multiple eth_call requests into a single
+# aggregate3 contract call. When enabled, sabre intercepts eligible eth_call requests
+# within a batch, encodes them into one Multicall3 aggregate3 call, and fans the
+# results back out to individual callers. This reduces the number of EVM executions
+# on the upstream provider from N to 1, which is cheaper on metered providers, atomic
+# (all calls read from the same block state), and lower latency.
+#
+# Eligibility: only pure read calls (no from, value, gas, or gasPrice) with both
+# to and data fields are aggregated. Calls with execution context modifiers pass
+# through unchanged since Multicall3 would alter their msg.sender/value semantics.
+enabled = true
+# The Multicall3 contract address. Deployed via CREATE2 at the same address on all
+# EVM chains. You should not need to change this unless you are running against a
+# custom chain with Multicall3 deployed elsewhere.
+address = "0xcA11bde05977b3631167028862bE2a173976CA11"
+# The maximum number of eth_call requests to pack into a single aggregate3 call.
+# If a batch contains more eligible calls than this limit, they are chunked into
+# multiple multicall requests. Higher values increase the density of each call but
+# may hit gas limits on some chains. 150 is conservative and safe for all chains.
+max_calls = 150
+
 # Health checking allows sabre to automatically detect and route around unhealthy
 # backend nodes. When enabled, sabre will periodically send health check requests
 # to each configured backend to ensure they are responding correctly. If a backend

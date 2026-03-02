@@ -21,6 +21,7 @@ var reservedKeys = map[string]bool{
 	"performance":   true,
 	"subscriptions": true,
 	"batch":         true,
+	"multicall":     true,
 	"cache":         true,
 	"listen":        true,
 	"max_attempts":  true,
@@ -70,6 +71,13 @@ type SubscriptionsConfig struct {
 	MaxMessageSize                int64         `toml:"max_message_size"`
 }
 
+// MulticallConfig holds the configuration for Multicall3 aggregation.
+type MulticallConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Address  string `toml:"address"`
+	MaxCalls int    `toml:"max_calls"`
+}
+
 // BatchConfig holds the configuration for batching.
 type BatchConfig struct {
 	Enabled          bool          `toml:"enabled"`
@@ -95,6 +103,7 @@ type Config struct {
 	Performance    PerformanceConfig
 	Subscriptions  SubscriptionsConfig
 	Batch          BatchConfig
+	Multicall      MulticallConfig
 	Cache          CacheConfig
 	Backends       []*Backend
 	BackendsCt     map[string]int
@@ -296,6 +305,25 @@ func ParseConfig(path string) Config {
 		}
 	}
 
+	if m, ok := raw["multicall"]; ok {
+		var mc MulticallConfig
+		mraw, _ := toml.Marshal(m)
+		_ = toml.Unmarshal(mraw, &mc)
+		if mc.Address == "" {
+			mc.Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
+		}
+		if mc.MaxCalls <= 0 {
+			mc.MaxCalls = 150
+		}
+		cfg.Multicall = mc
+	} else {
+		cfg.Multicall = MulticallConfig{
+			Enabled:  false,
+			Address:  "0xcA11bde05977b3631167028862bE2a173976CA11",
+			MaxCalls: 150,
+		}
+	}
+
 	if b, ok := raw["batch"]; ok {
 		var bc BatchConfig
 		raw, _ := toml.Marshal(b)
@@ -320,6 +348,7 @@ func ParseConfig(path string) Config {
 				bc.MaxBatchSize,
 				bc.MaxBatchWaitTime,
 				bc.MaxBatchWorkers,
+				cfg.Multicall,
 			)
 		}
 	} else {

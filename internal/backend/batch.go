@@ -34,6 +34,7 @@ type BatchProcessor struct {
 	maxBatchSize  int
 	maxWaitTime   time.Duration
 	maxConcurrent int
+	multicall     MulticallConfig
 
 	batches map[string]*Batch
 	workers chan struct{}
@@ -50,11 +51,12 @@ type Batch struct {
 }
 
 // NewBatchProcessor creates a new batch processor with the specified configuration.
-func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int) *BatchProcessor {
+func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurrent int, multicall MulticallConfig) *BatchProcessor {
 	return &BatchProcessor{
 		maxBatchSize:  maxBatchSize,
 		maxWaitTime:   maxWaitTime,
 		maxConcurrent: maxConcurrent,
+		multicall:     multicall,
 		batches:       make(map[string]*Batch),
 		workers:       make(chan struct{}, maxConcurrent),
 	}
@@ -141,9 +143,37 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 	delete(bp.batches, batch.BackendURL)
 	bp.mu.Unlock()
 
+	// Aggregate eligible eth_call requests into Multicall3 calls.
+	var mapping *MulticallMapping
+	if bp.multicall.Enabled {
+		requests, mapping = aggregateEthCalls(requests, bp.multicall)
+	}
+
 	responses, err := bp.sendBatch(batch.BackendURL, requests)
+
+	// Expand multicall responses back into individual responses.
+	if err == nil && mapping != nil {
+		responses, err = expandMulticallResponses(responses, mapping)
+	}
+
 	if err != nil {
-		for _, req := range requests {
+		// On error, fan out to all original request IDs. When multicall is
+		// active, the request list contains synthetic IDs — use the mapping
+		// to recover original IDs.
+		errorTargets := requests
+		if mapping != nil {
+			errorTargets = make([]BatchRequest, 0, len(mapping.Passthrough)+countEntries(mapping))
+			errorTargets = append(errorTargets, mapping.Passthrough...)
+			for _, group := range mapping.Groups {
+				for _, entry := range group.Entries {
+					errorTargets = append(errorTargets, BatchRequest{
+						JSONRPC: "2.0",
+						ID:      entry.OriginalID,
+					})
+				}
+			}
+		}
+		for _, req := range errorTargets {
 			if ch, exists := responseChans[string(req.ID)]; exists {
 				errorResp := BatchResponse{
 					JSONRPC: req.JSONRPC,
