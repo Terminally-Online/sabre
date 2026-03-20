@@ -17,6 +17,7 @@ import (
 	"sabre/internal/backend"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 const (
@@ -64,7 +65,24 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 
 		TotalReq.Add(1)
 
+		reqStart := time.Now()
+		var (
+			method   string
+			cacheHit bool
+			upstream string
+		)
+
 		chain := strings.Trim(strings.TrimSpace(r.URL.Path), "/")
+
+		defer func() {
+			zap.L().Info("rpc",
+				zap.String("chain", chain),
+				zap.String("method", method),
+				zap.Bool("cache_hit", cacheHit),
+				zap.String("upstream", upstream),
+				zap.Duration("latency", time.Since(reqStart)),
+			)
+		}()
 		if chain == "" {
 			http.NotFound(w, r)
 			return
@@ -131,10 +149,13 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		var uncachedIndices []int
 
 		if !isBatch {
+			method = req.Method
 			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
 			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
 			if ttl > 0 {
 				if cached, ok := cstore.Get(key); ok {
+					cacheHit = true
+					zap.L().Debug("cache_hit", zap.String("chain", chain), zap.String("method", req.Method))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusOK)
 					_, _ = w.Write(cached)
@@ -142,6 +163,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 				}
 			}
 		} else {
+			method = "batch"
 			originalReqs = make([]rpcReq, len(reqs))
 			copy(originalReqs, reqs)
 
@@ -189,6 +211,9 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		)
 
 		for attempt := 1; attempt <= cfg.Sabre.MaxAttempts; attempt++ {
+			if attempt > 1 {
+				zap.L().Warn("retry", zap.String("chain", chain), zap.String("method", method), zap.Int("attempt", attempt))
+			}
 			bk, err = lb.Pick(r.Context(), chain, "http")
 			if err != nil {
 				if attempt == cfg.Sabre.MaxAttempts {
@@ -235,6 +260,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			}
 
 			if err == nil && !isRetryableStatus(status) {
+				upstream = bk.Name
 				lb.UpdateLatency(bk, time.Since(start), cfg.Performance)
 				if status == http.StatusOK {
 					if isBatch {
