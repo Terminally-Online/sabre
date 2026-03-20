@@ -326,6 +326,14 @@ max_per_second = 100
 url = "https://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
 ws_url = "wss://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
 
+[quicknode.8453]
+url = "https://${QUICKNODE_BASE_NAME}.base-mainnet.quiknode.pro/${QUICKNODE_BASE_ID}/"
+ws_url = "wss://${QUICKNODE_BASE_NAME}.base-mainnet.quiknode.pro/${QUICKNODE_BASE_ID}/"
+
+[quicknode.10]
+url = "https://${QUICKNODE_OPTIMISM_NAME}.optimism.quiknode.pro/${QUICKNODE_OPTIMISM_ID}/"
+ws_url = "wss://${QUICKNODE_OPTIMISM_NAME}.optimism.quiknode.pro/${QUICKNODE_OPTIMISM_ID}/"
+
 # Drpc is a decentralized RPC node provider to Ethereum, Polygon, Arbitrum and others
 # that avoid the typical concerns that exist when using centralized providers. At
 # Terminally Online we believe Drpc to be a great option for your fallback provider.
@@ -338,3 +346,11 @@ max_per_second = 40
 [drpc.1]
 url = "https://eth.drpc.org"
 ws_url = "wss://eth.drpc.org"
+
+[drpc.8453]
+url = "https://base.drpc.org"
+ws_url = "wss://base.drpc.org"
+
+[drpc.10]
+url = "https://optimism.drpc.org"
+ws_url = "wss://optimism.drpc.org"
