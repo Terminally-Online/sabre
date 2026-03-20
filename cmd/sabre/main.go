@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/joho/godotenv"
+	"go.uber.org/zap"
 )
 
 // Version and build information - set by linker flags
@@ -79,9 +79,13 @@ func main() {
 		os.Exit(0)
 	}
 
+	logger := zap.Must(zap.NewProductionConfig().Build())
+	zap.ReplaceGlobals(logger)
+	defer func() { _ = logger.Sync() }()
+
 	if _, err := os.Stat(*envPath); err == nil {
 		if err := godotenv.Load(*envPath); err != nil {
-			log.Fatalf("loading .env file: %v", err)
+			zap.L().Fatal("loading .env file", zap.Error(err))
 		}
 	}
 
@@ -93,7 +97,7 @@ func main() {
 
 	cstore, err := backend.Open(cfg.Cache)
 	if err != nil {
-		log.Fatalf("cache open: %v", err)
+		zap.L().Fatal("cache open", zap.Error(err))
 	}
 	defer cstore.Close()
 
@@ -117,7 +121,7 @@ func main() {
 		}
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("Error during server shutdown: %v", err)
+			zap.L().Error("server shutdown", zap.Error(err))
 		}
 	}()
 
@@ -125,6 +129,6 @@ func main() {
 	defer stop()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server error: %v", err)
+		zap.L().Fatal("server error", zap.Error(err))
 	}
 }

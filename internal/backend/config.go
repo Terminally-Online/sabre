@@ -2,7 +2,6 @@ package backend
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
@@ -117,13 +117,13 @@ type Config struct {
 func ParseConfig(path string) Config {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatalf("reading config file: %v", err)
+		zap.L().Fatal("reading config file", zap.String("path", path), zap.Error(err))
 	}
 
 	var raw map[string]any
 	expanded := os.ExpandEnv(string(b))
 	if err := toml.Unmarshal([]byte(expanded), &raw); err != nil {
-		log.Fatalf("parsing config file: %v", err)
+		zap.L().Fatal("parsing config file", zap.String("path", path), zap.Error(err))
 	}
 
 	// Check for backends after parsing all sections
@@ -377,7 +377,7 @@ func ParseConfig(path string) Config {
 			cc.MemEntries = 100_000
 		}
 		if cc.Enabled && cc.Path == "" {
-			log.Fatal("cache is enabled but no path is configured")
+			zap.L().Fatal("cache is enabled but no path is configured")
 		}
 		if cc.TTLLatest <= 0 {
 			cc.TTLLatest = 250 * time.Millisecond
@@ -446,7 +446,7 @@ func ParseConfig(path string) Config {
 			var c chainOnly
 			y, _ := toml.Marshal(subMap)
 			if err := toml.Unmarshal(y, &c); err != nil {
-				log.Fatalf("parsing chain config for %s: %v", provName, err)
+				zap.L().Fatal("parsing chain config", zap.String("provider", provName), zap.Error(err))
 			}
 			if c.URL == "" {
 				panic(fmt.Sprintf("backend %s chain %s has no URL configured", provName, chainName))
