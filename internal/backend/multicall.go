@@ -55,17 +55,25 @@ type MulticallMapping struct {
 	Passthrough []BatchRequest
 }
 
-// parseEthCallParams extracts the call object and block tag from eth_call params.
-// eth_call params: [{to, data, ...}, blockTag] or [{to, data, ...}]
-func parseEthCallParams(params json.RawMessage) (ethCallParams, string, bool) {
+// parsedEthCall holds the parsed components of an eth_call request.
+type parsedEthCall struct {
+	Params            ethCallParams
+	BlockTag          string
+	HasStateOverrides bool
+}
+
+// parseEthCallParams extracts the call object, block tag, and state override
+// presence from eth_call params.
+// eth_call params: [{to, data, ...}, blockTag, stateOverrides?]
+func parseEthCallParams(params json.RawMessage) (parsedEthCall, bool) {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(params, &raw); err != nil || len(raw) == 0 {
-		return ethCallParams{}, "", false
+		return parsedEthCall{}, false
 	}
 
 	var callObj ethCallParams
 	if err := json.Unmarshal(raw[0], &callObj); err != nil {
-		return ethCallParams{}, "", false
+		return parsedEthCall{}, false
 	}
 
 	blockTag := "latest"
@@ -76,7 +84,11 @@ func parseEthCallParams(params json.RawMessage) (ethCallParams, string, bool) {
 		}
 	}
 
-	return callObj, blockTag, true
+	return parsedEthCall{
+		Params:            callObj,
+		BlockTag:          blockTag,
+		HasStateOverrides: len(raw) > 2,
+	}, true
 }
 
 type eligibleCall struct {
@@ -99,23 +111,31 @@ func aggregateEthCalls(requests []BatchRequest, cfg MulticallConfig) ([]BatchReq
 			continue
 		}
 
-		params, blockTag, ok := parseEthCallParams(req.Params)
-		if !ok || params.To == "" || params.Data == "" {
+		parsed, ok := parseEthCallParams(req.Params)
+		if !ok || parsed.Params.To == "" || parsed.Params.Data == "" {
+			mapping.Passthrough = append(mapping.Passthrough, req)
+			continue
+		}
+
+		// Calls with state overrides depend on custom code/storage deployed at
+		// call time. Wrapping them in Multicall3 strips those overrides and
+		// changes the execution environment. Pass through as-is.
+		if parsed.HasStateOverrides {
 			mapping.Passthrough = append(mapping.Passthrough, req)
 			continue
 		}
 
 		// Calls with execution context modifiers behave differently through
 		// Multicall3 (msg.sender, gas, value all change). Pass through as-is.
-		if params.From != "" || params.Value != "" || params.Gas != "" || params.GasPrice != "" {
+		if parsed.Params.From != "" || parsed.Params.Value != "" || parsed.Params.Gas != "" || parsed.Params.GasPrice != "" {
 			mapping.Passthrough = append(mapping.Passthrough, req)
 			continue
 		}
 
 		eligible = append(eligible, eligibleCall{
 			requestIdx: i,
-			params:     params,
-			blockTag:   blockTag,
+			params:     parsed.Params,
+			blockTag:   parsed.BlockTag,
 		})
 	}
 

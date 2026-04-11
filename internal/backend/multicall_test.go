@@ -14,12 +14,13 @@ import (
 
 func TestParseEthCallParams(t *testing.T) {
 	tests := []struct {
-		name     string
-		params   string
-		wantTo   string
-		wantData string
-		wantTag  string
-		wantOK   bool
+		name             string
+		params           string
+		wantTo           string
+		wantData         string
+		wantTag          string
+		wantHasOverrides bool
+		wantOK           bool
 	}{
 		{
 			name:     "standard with latest",
@@ -68,27 +69,89 @@ func TestParseEthCallParams(t *testing.T) {
 			params: `null`,
 			wantOK: false,
 		},
+		{
+			name:             "with state overrides",
+			params:           `[{"to":"0xdead","data":"0xbeef"},"latest",{"0xdead":{"code":"0x00"}}]`,
+			wantTo:           "0xdead",
+			wantData:         "0xbeef",
+			wantTag:          "latest",
+			wantHasOverrides: true,
+			wantOK:           true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params, tag, ok := parseEthCallParams(json.RawMessage(tt.params))
+			parsed, ok := parseEthCallParams(json.RawMessage(tt.params))
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
 			if !ok {
 				return
 			}
-			if params.To != tt.wantTo {
-				t.Errorf("to = %q, want %q", params.To, tt.wantTo)
+			if parsed.Params.To != tt.wantTo {
+				t.Errorf("to = %q, want %q", parsed.Params.To, tt.wantTo)
 			}
-			if params.Data != tt.wantData {
-				t.Errorf("data = %q, want %q", params.Data, tt.wantData)
+			if parsed.Params.Data != tt.wantData {
+				t.Errorf("data = %q, want %q", parsed.Params.Data, tt.wantData)
 			}
-			if tag != tt.wantTag {
-				t.Errorf("tag = %q, want %q", tag, tt.wantTag)
+			if parsed.BlockTag != tt.wantTag {
+				t.Errorf("tag = %q, want %q", parsed.BlockTag, tt.wantTag)
+			}
+			if parsed.HasStateOverrides != tt.wantHasOverrides {
+				t.Errorf("hasStateOverrides = %v, want %v", parsed.HasStateOverrides, tt.wantHasOverrides)
 			}
 		})
+	}
+}
+
+func TestAggregateExcludesStateOverrides(t *testing.T) {
+	cfg := MulticallConfig{
+		Address:  "0xcA11bde05977b3631167028862bE2a173976CA11",
+		MaxCalls: 100,
+	}
+
+	// Two normal calls + one with state overrides. Only the two normal calls
+	// should be aggregated; the state override call must pass through.
+	requests := []BatchRequest{
+		{JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Method: "eth_call", Params: json.RawMessage(`[{"to":"0xaaaa","data":"0x1111"},"latest"]`)},
+		{JSONRPC: "2.0", ID: json.RawMessage(`"2"`), Method: "eth_call", Params: json.RawMessage(`[{"to":"0xbbbb","data":"0x2222"},"latest"]`)},
+		{JSONRPC: "2.0", ID: json.RawMessage(`"3"`), Method: "eth_call", Params: json.RawMessage(`[{"to":"0xcccc","data":"0x3333"},"latest",{"0xcccc":{"code":"0x00"}}]`)},
+	}
+
+	out, mapping := aggregateEthCalls(requests, cfg)
+	if mapping == nil {
+		t.Fatal("expected aggregation to occur")
+	}
+
+	// The state override request should be in passthrough.
+	foundOverrideInPassthrough := false
+	for _, pt := range mapping.Passthrough {
+		if string(pt.ID) == `"3"` {
+			foundOverrideInPassthrough = true
+		}
+	}
+	if !foundOverrideInPassthrough {
+		t.Error("state override request should be in passthrough, not aggregated")
+	}
+
+	// Should have one multicall group with the 2 normal calls.
+	if len(mapping.Groups) != 1 {
+		t.Fatalf("expected 1 multicall group, got %d", len(mapping.Groups))
+	}
+	if len(mapping.Groups[0].Entries) != 2 {
+		t.Errorf("expected 2 entries in multicall group, got %d", len(mapping.Groups[0].Entries))
+	}
+
+	// Output should have: 1 passthrough (state override) + 1 synthetic multicall.
+	multicallCount := 0
+	for _, r := range out {
+		if strings.HasPrefix(string(r.ID), `"__multicall_`) {
+			multicallCount++
+		}
+	}
+	if multicallCount != 1 {
+		t.Errorf("expected 1 synthetic multicall request, got %d", multicallCount)
 	}
 }
 
