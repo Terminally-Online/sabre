@@ -296,10 +296,8 @@ ttl_block_ms = 86400000
 #
 # → Get yours at: https://quicknode.com/signup?via=chance
 [quicknode]
-# The second-tier plan of QuickNode maxes out at 125 requests per second, which 
-# is sufficient for most use cases. Typically, your only option would be to 
-# upgrade your plan, but you are here now so you know what to do.
-max_per_second = 100
+# QuickNode plan allows 500 requests per second.
+max_per_second = 500
 
 # Chain support has been completely abstracted away from the codebase. Due to this,
 # when you define a new chain, you do that by including a chain name suffix like the
