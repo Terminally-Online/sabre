@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -189,18 +190,35 @@ func (s *Store) Get(key string) ([]byte, bool) {
 }
 
 // Put stores a value in the cache with the specified TTL and chain ID.
-func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string) {
+// If callBlockNum/callBlockHash are non-zero, they identify the block the
+// response data is about (extracted from the response body via
+// ExtractBlockInfo). When the caller's block is past MaxReorgDepth behind
+// the chain tip, the entry is immutable and stored with an effectively
+// infinite expiry — no point re-fetching historical data that cannot
+// change. Callers that don't have block info (non-block-scoped methods)
+// pass 0/"" and get the traditional tip-based reorg tracking.
+func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string, callBlockNum uint64, callBlockHash string) {
 	if !s.cfg.Enabled || ttl <= 0 {
 		return
 	}
-	exp := time.Now().Add(ttl).UnixMilli()
 
-	var blockHash string
-	var blockNum uint64
 	s.mu.RLock()
-	blockHash = s.latestHashes[chainID]
-	blockNum = s.latestBlocks[chainID]
+	latestTipBlock := s.latestBlocks[chainID]
+	latestTipHash := s.latestHashes[chainID]
 	s.mu.RUnlock()
+
+	blockNum := callBlockNum
+	blockHash := callBlockHash
+	if blockNum == 0 {
+		blockNum = latestTipBlock
+		blockHash = latestTipHash
+	}
+
+	exp := time.Now().Add(ttl).UnixMilli()
+	if callBlockNum > 0 && latestTipBlock > callBlockNum && latestTipBlock-callBlockNum > uint64(s.cfg.MaxReorgDepth) {
+		// Past reorg depth: data is immutable. Never expire.
+		exp = math.MaxInt64
+	}
 
 	e := entry{
 		Expiry:    exp,
@@ -301,7 +319,15 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *Subscr
 		}
 		return cfg.TTLLatest
 	case "eth_getBlockByHash", "eth_getTransactionByHash", "eth_getTransactionReceipt":
-		return cfg.TTLLatest
+		// Hash-addressed: the hash IS the content identity, so the
+		// response is effectively immutable (modulo reorgs that
+		// invalidate the containing block, which the entry's block
+		// info + reorg detection handle). Use TTLBlock, same as
+		// block-number-scoped eth_call/eth_getBalance/etc.
+		if subsCfg != nil && subsCfg.TTLBlock > 0 {
+			return subsCfg.TTLBlock
+		}
+		return cfg.TTLBlock
 	case "eth_getLogs":
 		if logsNumericRange(params) {
 			if subsCfg != nil && subsCfg.TTLBlock > 0 {

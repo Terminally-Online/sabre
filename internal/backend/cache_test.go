@@ -83,7 +83,7 @@ func TestStore_GetPut(t *testing.T) {
 	ttl := 1 * time.Second
 	chainID := "ethereum"
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 
 	retrieved, found := store.Get(key)
 	if !found {
@@ -109,7 +109,7 @@ func TestStore_TTLExpiration(t *testing.T) {
 	ttl := 10 * time.Millisecond
 	chainID := "ethereum"
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 	retrieved, found := store.Get(key)
 	if !found {
 		t.Error("expected data to be found immediately")
@@ -143,7 +143,7 @@ func TestStore_DisabledCache(t *testing.T) {
 	data := []byte("test-data")
 	ttl := 1 * time.Second
 	chainID := "ethereum"
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 
 	retrieved, found := store.Get(key)
 	if found {
@@ -175,7 +175,7 @@ func TestStore_BlockHashValidation(t *testing.T) {
 	data := []byte("test-data")
 	ttl := 1 * time.Second
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 
 	_, found := store.Get(key)
 	if !found {
@@ -214,7 +214,7 @@ func TestStore_ReorgDetection(t *testing.T) {
 	data := []byte("test-data")
 	ttl := 1 * time.Second
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 	_, _ = store.Get(key)
 }
 
@@ -241,7 +241,7 @@ func TestStore_MultipleChains(t *testing.T) {
 	ttl := 1 * time.Second
 
 	for _, tc := range testCases {
-		store.Put(tc.key, tc.data, ttl, tc.chainID)
+		store.Put(tc.key, tc.data, ttl, tc.chainID, 0, "")
 	}
 
 	for _, tc := range testCases {
@@ -274,7 +274,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 			key := fmt.Sprintf("concurrent-key-%d", id)
 			data := fmt.Appendf(nil, "concurrent-data-%d", id)
 
-			store.Put(key, data, ttl, chainID)
+			store.Put(key, data, ttl, chainID, 0, "")
 
 			retrieved, found := store.Get(key)
 			if !found {
@@ -309,7 +309,7 @@ func TestStore_BlockHashValidationEdgeCases(t *testing.T) {
 	data := []byte("test-data")
 	ttl := 1 * time.Second
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 	_, found := store.Get(key)
 	if !found {
 		t.Error("expected data to be found with empty block hash")
@@ -345,7 +345,7 @@ func TestStore_CleanupOldBlockHashes(t *testing.T) {
 	data := []byte("test-data")
 	ttl := 1 * time.Second
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 	_, found := store.Get(key)
 	if !found {
 		t.Error("expected data to be found after cleanup")
@@ -367,7 +367,7 @@ func TestStore_ZeroTTL(t *testing.T) {
 	ttl := 0 * time.Second
 	chainID := "ethereum"
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 
 	retrieved, found := store.Get(key)
 	if found {
@@ -393,7 +393,7 @@ func TestStore_NegativeTTL(t *testing.T) {
 	ttl := -1 * time.Second
 	chainID := "ethereum"
 
-	store.Put(key, data, ttl, chainID)
+	store.Put(key, data, ttl, chainID, 0, "")
 	retrieved, found := store.Get(key)
 	if found {
 		t.Error("expected data not to be found with negative TTL")

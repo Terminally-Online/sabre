@@ -284,7 +284,8 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 							}
 
 							for i, respBytes := range batchResponses {
-								if blockNum, blockHash := backend.ExtractBlockInfo(respBytes); blockNum > 0 {
+								blockNum, blockHash := backend.ExtractBlockInfo(respBytes)
+								if blockNum > 0 {
 									cstore.UpdateLatestBlock(chain, blockNum, blockHash, respBytes)
 								}
 
@@ -293,7 +294,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
 									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
 									if ttl > 0 {
-										cstore.Put(key, respBytes, ttl, chain)
+										cstore.Put(key, respBytes, ttl, chain, blockNum, blockHash)
 									}
 								}
 							}
@@ -345,7 +346,8 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
 			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
 			if ttl > 0 {
-				cstore.Put(key, data, ttl, chain)
+				blockNum, blockHash := backend.ExtractBlockInfo(data)
+				cstore.Put(key, data, ttl, chain, blockNum, blockHash)
 			}
 		}
 
