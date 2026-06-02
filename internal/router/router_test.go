@@ -778,3 +778,176 @@ func TestRouter_JSONRPCBatchRequest_InvalidJSON(t *testing.T) {
 		t.Errorf("expected error response, got %s", responseBody)
 	}
 }
+
+// TestRouter_XCacheHeader locks the cache-observability contract: sabre must
+// label every response with X-Cache (miss on the upstream path, hit when
+// served from cache) so gusher's gusher_sabre_requests_total{cache} metric —
+// and the cache panel on the RPC dashboard — populates correctly.
+func TestRouter_XCacheHeader(t *testing.T) {
+	// The on-disk pebble cache persists between runs, so start from a clean
+	// directory — this test asserts a miss-then-hit transition that a stale
+	// entry would defeat.
+	os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	mockResponse := `{"jsonrpc":"2.0","id":"1","result":"0x1234"}`
+	for _, b := range cfg.Backends {
+		b.HealthUp.Store(true)
+		mc := b.Client.Transport.(*backend.MockHTTPClient)
+		mc.ClearRequests()
+		mc.SetResponse(b.URL.String(), backend.MockResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(mockResponse),
+		})
+	}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	// eth_getBlockByNumber pinned to a concrete block number → cacheable
+	// with the long block TTL, so the second call must be served from cache.
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "1",
+		"method":  "eth_getBlockByNumber",
+		"params":  []any{"0x1", false},
+	})
+
+	do := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		return w
+	}
+
+	upstreamCalls := func() int {
+		n := 0
+		for _, b := range cfg.Backends {
+			n += len(b.Client.Transport.(*backend.MockHTTPClient).GetRequests())
+		}
+		return n
+	}
+
+	w1 := do()
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call: expected 200, got %d", w1.Code)
+	}
+	if got := w1.Header().Get("X-Cache"); got != "miss" {
+		t.Errorf("first call: expected X-Cache=miss, got %q", got)
+	}
+	afterFirst := upstreamCalls()
+	if afterFirst == 0 {
+		t.Fatalf("first call should have reached an upstream")
+	}
+
+	w2 := do()
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call: expected 200, got %d", w2.Code)
+	}
+	if got := w2.Header().Get("X-Cache"); got != "hit" {
+		t.Errorf("second call: expected X-Cache=hit, got %q", got)
+	}
+	if afterSecond := upstreamCalls(); afterSecond != afterFirst {
+		t.Errorf("cache hit should not reach upstream: before=%d after=%d", afterFirst, afterSecond)
+	}
+}
+
+// TestRouter_ImmutableMulticallCachedAcrossBlocks proves the cross-reset win
+// end-to-end through the HTTP router: an aggregate3 multicall of immutable
+// reads (decimals) misses upstream once, then a content-identical multicall
+// pinned to a DIFFERENT block is served entirely from cache — and the
+// synthesized response reproduces the upstream result byte-for-byte.
+func TestRouter_ImmutableMulticallCachedAcrossBlocks(t *testing.T) {
+	os.RemoveAll(getUniqueTestCachePath(t))
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	// aggregate3([{ target=0x..aa, allowFailure=true, callData=decimals() }])
+	reqData := "0x82ad56cb" +
+		"0000000000000000000000000000000000000000000000000000000000000020" + // array offset
+		"0000000000000000000000000000000000000000000000000000000000000001" + // n = 1
+		"0000000000000000000000000000000000000000000000000000000000000020" + // tuple[0] offset
+		"00000000000000000000000000000000000000000000000000000000000000aa" + // target
+		"0000000000000000000000000000000000000000000000000000000000000001" + // allowFailure
+		"0000000000000000000000000000000000000000000000000000000000000060" + // callData offset
+		"0000000000000000000000000000000000000000000000000000000000000004" + // callData len
+		"313ce56700000000000000000000000000000000000000000000000000000000" // decimals() selector
+
+	// aggregate3 result: [{ success=true, returnData=uint256(18) }]
+	resultHex := "0x" +
+		"0000000000000000000000000000000000000000000000000000000000000020" + // array offset
+		"0000000000000000000000000000000000000000000000000000000000000001" + // n = 1
+		"0000000000000000000000000000000000000000000000000000000000000020" + // elem[0] offset
+		"0000000000000000000000000000000000000000000000000000000000000001" + // success
+		"0000000000000000000000000000000000000000000000000000000000000040" + // returnData offset
+		"0000000000000000000000000000000000000000000000000000000000000020" + // returnData len
+		"0000000000000000000000000000000000000000000000000000000000000012" // 18
+
+	upstreamBody := `{"jsonrpc":"2.0","id":1,"result":"` + resultHex + `"}`
+	for _, b := range cfg.Backends {
+		b.HealthUp.Store(true)
+		mc := b.Client.Transport.(*backend.MockHTTPClient)
+		mc.ClearRequests()
+		mc.SetResponse(b.URL.String(), backend.MockResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(upstreamBody),
+		})
+	}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	call := func(blockTag string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": "1", "method": "eth_call",
+			"params": []any{map[string]string{"to": "0x00000000000000000000000000000000000000bb", "data": reqData}, blockTag},
+		})
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		return w
+	}
+
+	upstreamCalls := func() int {
+		n := 0
+		for _, b := range cfg.Backends {
+			n += len(b.Client.Transport.(*backend.MockHTTPClient).GetRequests())
+		}
+		return n
+	}
+
+	// First call at "latest": miss → upstream → sub-calls cached.
+	w1 := call("latest")
+	if w1.Code != http.StatusOK || w1.Header().Get("X-Cache") != "miss" {
+		t.Fatalf("first call: code=%d x-cache=%q", w1.Code, w1.Header().Get("X-Cache"))
+	}
+	if upstreamCalls() == 0 {
+		t.Fatal("first call must reach upstream")
+	}
+
+	// Second call at a DIFFERENT block: served from the immutable sub-call cache.
+	before := upstreamCalls()
+	w2 := call("0x1312d00")
+	if w2.Code != http.StatusOK || w2.Header().Get("X-Cache") != "hit" {
+		t.Fatalf("second call must be a cache hit: code=%d x-cache=%q", w2.Code, w2.Header().Get("X-Cache"))
+	}
+	if upstreamCalls() != before {
+		t.Errorf("cache hit must not reach upstream: before=%d after=%d", before, upstreamCalls())
+	}
+
+	// The synthesized result must reproduce the upstream result exactly.
+	var r1, r2 struct{ Result string `json:"result"` }
+	_ = json.Unmarshal(w1.Body.Bytes(), &r1)
+	_ = json.Unmarshal(w2.Body.Bytes(), &r2)
+	if r2.Result != r1.Result || r2.Result != resultHex {
+		t.Fatalf("synthesized result mismatch:\n upstream=%s\n cached  =%s", r1.Result, r2.Result)
+	}
+}

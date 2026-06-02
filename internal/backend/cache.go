@@ -183,7 +183,10 @@ func (s *Store) Get(key string) ([]byte, bool) {
 			s.mem.Add(key, e)
 			return e.Body, true
 		}
-		_ = s.db.Delete([]byte(key), pebble.Sync)
+		// NOTE: NoSync — the cache is regenerable from upstream, so durability
+		// across a crash is worthless. Forcing an fsync here would put disk
+		// latency on the request hot path.
+		_ = s.db.Delete([]byte(key), pebble.NoSync)
 	}
 
 	return nil, false
@@ -233,7 +236,10 @@ func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string, 
 	}
 	if s.db != nil {
 		buf, _ := json.Marshal(e)
-		_ = s.db.Set([]byte(key), buf, pebble.Sync)
+		// NoSync: see Get — the cache is regenerable, so we never pay an
+		// fsync on the request path. Pebble still flushes to disk
+		// asynchronously, which is all an ephemeral cache needs.
+		_ = s.db.Set([]byte(key), buf, pebble.NoSync)
 	}
 }
 
@@ -287,6 +293,32 @@ func Open(cfg CacheConfig) (*Store, error) {
 	}
 	mem, _ := lru.New[string, entry](cfg.MemEntries)
 	return &Store{db: db, mem: mem, cfg: cfg}, nil
+}
+
+// ImmortalTTL is a sentinel positive TTL used to gate cache lookups for
+// entries that never expire (immutable multicall results).
+const ImmortalTTL = 100 * 365 * 24 * time.Hour
+
+// PutImmortal stores an immutable multicall response with no expiry and no
+// block/reorg association — the response can never change, so it survives
+// indefinitely and across client database resets. BlockHash is left empty so
+// IsBlockHashValid never invalidates it on a reorg.
+func (s *Store) PutImmortal(key string, body []byte, chainID string) {
+	if !s.cfg.Enabled {
+		return
+	}
+	e := entry{
+		Expiry:  math.MaxInt64,
+		Body:    body,
+		ChainID: chainID,
+	}
+	if s.mem != nil {
+		s.mem.Add(key, e)
+	}
+	if s.db != nil {
+		buf, _ := json.Marshal(e)
+		_ = s.db.Set([]byte(key), buf, pebble.NoSync)
+	}
 }
 
 // CanonicalKey generates a canonical cache key for a JSON-RPC request.

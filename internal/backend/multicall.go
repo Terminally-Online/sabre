@@ -12,6 +12,85 @@ import (
 // aggregate3 function selector: keccak256("aggregate3((address,bool,bytes)[])")[:4]
 var aggregate3Selector = [4]byte{0x82, 0xad, 0x56, 0xcb}
 
+// immutableSelectors are view functions whose return value is fixed for the
+// life of the contract — they can never change response, so a result is
+// cacheable forever, independent of block. This is what lets a gusher DB
+// reset / reindex be served entirely from sabre instead of re-hammering
+// upstream for tens of thousands of token-metadata reads.
+//
+//	decimals() 0x313ce567   symbol() 0x95d89b41   name() 0x06fdde03
+var immutableSelectors = map[[4]byte]bool{
+	{0x31, 0x3c, 0xe5, 0x67}: true, // decimals()
+	{0x95, 0xd8, 0x9b, 0x41}: true, // symbol()
+	{0x06, 0xfd, 0xde, 0x03}: true, // name()
+}
+
+// isImmutableSelector reports whether callData's 4-byte selector is an
+// immutable read whose result can be cached forever.
+func isImmutableSelector(callData []byte) bool {
+	if len(callData) < 4 {
+		return false
+	}
+	var sel [4]byte
+	copy(sel[:], callData[:4])
+	return immutableSelectors[sel]
+}
+
+// decodeAggregate3Calls ABI-decodes an aggregate3((address,bool,bytes)[])
+// calldata payload into its inner Call3 tuples. This is the inverse of
+// encodeAggregate3 and lets sabre cache the individual immutable sub-calls
+// inside an opaque multicall blob. Returns ok=false for anything that is not
+// a well-formed aggregate3 call.
+func decodeAggregate3Calls(data []byte) ([]call3, bool) {
+	if len(data) < 4 || [4]byte{data[0], data[1], data[2], data[3]} != aggregate3Selector {
+		return nil, false
+	}
+	args := data[4:]
+	if len(args) < 32 {
+		return nil, false
+	}
+
+	arrayOff := readUint256(args[0:32])
+	if int(arrayOff) > len(args) || len(args)-int(arrayOff) < 32 {
+		return nil, false
+	}
+	arr := args[arrayOff:]
+
+	n := readUint256(arr[0:32])
+	if n == 0 || n > 10000 {
+		return nil, false
+	}
+	if len(arr) < 32+int(n)*32 {
+		return nil, false
+	}
+
+	calls := make([]call3, n)
+	for i := uint64(0); i < n; i++ {
+		tupleOff := readUint256(arr[32+int(i)*32 : 64+int(i)*32])
+		abs := 32 + int(tupleOff)
+		if abs < 0 || abs+96 > len(arr) {
+			return nil, false
+		}
+		tuple := arr[abs:]
+
+		copy(calls[i].Target[:], tuple[12:32])
+		calls[i].AllowFailure = tuple[63] != 0
+
+		cdOff := readUint256(tuple[64:96])
+		if int(cdOff)+32 > len(tuple) {
+			return nil, false
+		}
+		cdLen := readUint256(tuple[cdOff : cdOff+32])
+		cdStart := int(cdOff) + 32
+		if cdStart+int(cdLen) > len(tuple) {
+			return nil, false
+		}
+		calls[i].CallData = make([]byte, cdLen)
+		copy(calls[i].CallData, tuple[cdStart:cdStart+int(cdLen)])
+	}
+	return calls, true
+}
+
 // multicallIDCounter generates unique synthetic request IDs for multicall requests.
 var multicallIDCounter atomic.Uint64
 
@@ -403,6 +482,56 @@ func encodeAggregate3(calls []call3) []byte {
 		// callData bytes, right-padded to 32-byte boundary
 		copy(buf[pos:], c.CallData)
 		pos += ceil32(len(c.CallData))
+	}
+
+	return buf
+}
+
+// encodeAggregate3Result ABI-encodes the return value of aggregate3: a
+// Result[] where Result = (bool success, bytes returnData). This is the
+// inverse of decodeAggregate3Result and lets sabre synthesize a complete
+// multicall response from individually-cached immutable sub-calls, so a
+// metadata batch can be served entirely from cache with zero upstream calls.
+func encodeAggregate3Result(results []multicallResult) []byte {
+	n := len(results)
+
+	elemOffsets := make([]int, n)
+	running := n * 32 // element-offset table precedes the tuple bodies
+	for i, r := range results {
+		elemOffsets[i] = running
+		// success(32) + bytesOffset(32) + bytesLen(32) + padded returnData
+		running += 96 + ceil32(len(r.ReturnData))
+	}
+
+	total := 32 + 32 + running // array offset + length + body
+	buf := make([]byte, total)
+	pos := 0
+
+	writeUint256(buf[pos:], 32) // offset to array data
+	pos += 32
+
+	writeUint256(buf[pos:], uint64(n)) // array length
+	pos += 32
+
+	for i := 0; i < n; i++ {
+		writeUint256(buf[pos:], uint64(elemOffsets[i]))
+		pos += 32
+	}
+
+	for _, r := range results {
+		if r.Success {
+			buf[pos+31] = 1
+		}
+		pos += 32
+
+		writeUint256(buf[pos:], 64) // offset to returnData within the tuple
+		pos += 32
+
+		writeUint256(buf[pos:], uint64(len(r.ReturnData)))
+		pos += 32
+
+		copy(buf[pos:], r.ReturnData)
+		pos += ceil32(len(r.ReturnData))
 	}
 
 	return buf

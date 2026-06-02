@@ -150,16 +150,41 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 
 		if !isBatch {
 			method = req.Method
-			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
-			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
-			if ttl > 0 {
-				if cached, ok := cstore.Get(key); ok {
-					cacheHit = true
-					zap.L().Debug("cache_hit", zap.String("chain", chain), zap.String("method", req.Method))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write(cached)
-					return
+
+			// Immutable multicall fast path: when every inner sub-call is an
+			// immutable read (decimals/symbol/name) and already cached, serve
+			// the whole aggregate3 result from cache with no upstream call.
+			// This is what makes a post-DB-reset reindex free.
+			if resultHex, ok := cstore.ServeImmutableMulticall(chain, req.Method, req.Params); ok {
+				cacheHit = true
+				zap.L().Debug("cache_hit", zap.String("chain", chain), zap.String("method", req.Method))
+				envelope, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  resultHex,
+				})
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Cache", "hit")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(envelope)
+				return
+			}
+
+			// aggregate3 multicalls bypass the whole-request cache — their
+			// immutable sub-calls are cached individually on the response path.
+			if !backend.IsAggregate3Multicall(req.Method, req.Params) {
+				key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
+				ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
+				if ttl > 0 {
+					if cached, ok := cstore.Get(key); ok {
+						cacheHit = true
+						zap.L().Debug("cache_hit", zap.String("chain", chain), zap.String("method", req.Method))
+						w.Header().Set("Content-Type", "application/json")
+						w.Header().Set("X-Cache", "hit")
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write(cached)
+						return
+					}
 				}
 			}
 		} else {
@@ -185,6 +210,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			}
 
 			if len(uncachedReqs) == 0 {
+				cacheHit = true
 				responses := make([]json.RawMessage, len(reqs))
 				for i, cached := range cachedResponses {
 					if cached != nil {
@@ -193,6 +219,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 				}
 				data, _ := json.Marshal(responses)
 				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Cache", "hit")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(data)
 				return
@@ -343,15 +370,22 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		}
 
 		if !isBatch && status == http.StatusOK {
-			key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
-			ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
-			if ttl > 0 {
-				blockNum, blockHash := backend.ExtractBlockInfo(data)
-				cstore.Put(key, data, ttl, chain, blockNum, blockHash)
+			if backend.IsAggregate3Multicall(req.Method, req.Params) {
+				// Cache the immutable sub-calls (decimals/symbol/name) of this
+				// multicall individually, block-independently, forever.
+				cstore.PopulateImmutableMulticall(chain, req.Params, data)
+			} else {
+				key, _ := backend.CanonicalKey(chain, req.Method, req.Params)
+				ttl := backend.TTL(req.Method, req.Params, cstore.Config(), &cfg.Subscriptions)
+				if ttl > 0 {
+					blockNum, blockHash := backend.ExtractBlockInfo(data)
+					cstore.Put(key, data, ttl, chain, blockNum, blockHash)
+				}
 			}
 		}
 
 		writeHopSafeHeaders(w, hdrs)
+		w.Header().Set("X-Cache", "miss")
 		if bk != nil {
 			w.Header().Set("X-Upstream-Provider", bk.Name)
 			w.Header().Set("X-Upstream-Chain", bk.Chain)

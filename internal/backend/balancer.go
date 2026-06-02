@@ -241,63 +241,87 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				lb.mu.Lock()
+				// Snapshot the backend set under a read lock, then probe
+				// every backend concurrently while holding NO lock. Network
+				// I/O must never sit on lb.mu — a slow or hung upstream would
+				// otherwise stall every Pick() for the probe's duration. Each
+				// probe reacquires the write lock only briefly (via
+				// UpdateLatency) to fold its sample into the weights.
+				lb.mu.RLock()
+				targets := make([]*Backend, 0, len(lb.backends))
 				for _, bes := range lb.backends {
-					for i := range bes {
-						b := bes[i]
-						ctx, cancel := context.WithTimeout(
-							context.Background(),
-							cfg.Health.Timeout*time.Millisecond,
-						)
-
-						req, _ := http.NewRequestWithContext(ctx, http.MethodPost, b.URL.String(), bytes.NewReader(body))
-						req.Header.Set("Content-Type", "application/json")
-						start := time.Now()
-						resp, err := b.Client.Do(req)
-						d := time.Since(start)
-						cancel()
-
-						if err != nil {
-							streak := b.HealthFailStreak.Add(1)
-							b.HealthPassStreak.Store(0)
-							b.HealthLastErr.Store(err.Error())
-							if streak >= int32(cfg.Health.FailsToDown) {
-								b.HealthUp.Store(false)
-							}
-							continue
-						}
-						defer resp.Body.Close()
-
-						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-							lb.UpdateLatency(b, d, cfg.Performance)
-
-							if cacheStore != nil {
-								respBody, _ := io.ReadAll(resp.Body)
-								cacheStore.CheckReorgFromHealthResponse(respBody, b.Chain)
-								resp.Body = io.NopCloser(bytes.NewReader(respBody))
-							}
-
-							streak := b.HealthPassStreak.Add(1)
-							b.HealthFailStreak.Store(0)
-							b.HealthLastOK.Store(time.Now())
-							if streak >= int32(cfg.Health.PassesToUp) {
-								b.HealthUp.Store(true)
-							}
-							continue
-						}
-
-						streak := b.HealthFailStreak.Add(1)
-						b.HealthPassStreak.Store(0)
-						b.HealthLastErr.Store(resp.Status)
-						if streak >= int32(cfg.Health.FailsToDown) {
-							b.HealthUp.Store(false)
-						}
-					}
+					targets = append(targets, bes...)
 				}
-				lb.mu.Unlock()
+				lb.mu.RUnlock()
+
+				var wg sync.WaitGroup
+				wg.Add(len(targets))
+				for _, b := range targets {
+					go func(b *Backend) {
+						defer wg.Done()
+						lb.probe(b, body, cfg, cacheStore)
+					}(b)
+				}
+				wg.Wait()
 			}
 		}
 	}()
+}
+
+// probe runs a single health check against one backend and folds the result
+// into its health state and the load-balancer weights. It holds no lock
+// across the network call so that slow or hung upstreams cannot stall
+// request routing; UpdateLatency reacquires lb.mu only for the brief weight
+// recomputation.
+func (lb *LoadBalancer) probe(b *Backend, body []byte, cfg Config, cacheStore *Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Health.Timeout*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		lb.markDown(b, err.Error(), cfg.Health.FailsToDown)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	start := time.Now()
+	resp, err := b.Client.Do(req)
+	d := time.Since(start)
+	if err != nil {
+		lb.markDown(b, err.Error(), cfg.Health.FailsToDown)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		lb.markDown(b, resp.Status, cfg.Health.FailsToDown)
+		return
+	}
+
+	lb.UpdateLatency(b, d, cfg.Performance)
+
+	if cacheStore != nil {
+		respBody, _ := io.ReadAll(resp.Body)
+		cacheStore.CheckReorgFromHealthResponse(respBody, b.Chain)
+	}
+
+	streak := b.HealthPassStreak.Add(1)
+	b.HealthFailStreak.Store(0)
+	b.HealthLastOK.Store(time.Now())
+	if streak >= int32(cfg.Health.PassesToUp) {
+		b.HealthUp.Store(true)
+	}
+}
+
+// markDown records a failed health probe and removes the backend from
+// rotation once it crosses the consecutive-failure threshold.
+func (lb *LoadBalancer) markDown(b *Backend, reason string, failsToDown int) {
+	streak := b.HealthFailStreak.Add(1)
+	b.HealthPassStreak.Store(0)
+	b.HealthLastErr.Store(reason)
+	if streak >= int32(failsToDown) {
+		b.HealthUp.Store(false)
+	}
 }
 
 func (lb *LoadBalancer) weigh(chain string, cfg PerformanceConfig) {
