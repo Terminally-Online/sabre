@@ -241,12 +241,8 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				// Snapshot the backend set under a read lock, then probe
-				// every backend concurrently while holding NO lock. Network
-				// I/O must never sit on lb.mu — a slow or hung upstream would
-				// otherwise stall every Pick() for the probe's duration. Each
-				// probe reacquires the write lock only briefly (via
-				// UpdateLatency) to fold its sample into the weights.
+				// Probe outside the lock: network I/O on lb.mu would stall
+				// every Pick() for the probe's duration.
 				lb.mu.RLock()
 				targets := make([]*Backend, 0, len(lb.backends))
 				for _, bes := range lb.backends {
@@ -268,11 +264,9 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 	}()
 }
 
-// probe runs a single health check against one backend and folds the result
-// into its health state and the load-balancer weights. It holds no lock
-// across the network call so that slow or hung upstreams cannot stall
-// request routing; UpdateLatency reacquires lb.mu only for the brief weight
-// recomputation.
+// probe runs one health check against a backend and folds the result into its
+// health state and the load-balancer weights, holding no lock across the
+// network call.
 func (lb *LoadBalancer) probe(b *Backend, body []byte, cfg Config, cacheStore *Store) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Health.Timeout*time.Millisecond)
 	defer cancel()
@@ -291,7 +285,7 @@ func (lb *LoadBalancer) probe(b *Backend, body []byte, cfg Config, cacheStore *S
 		lb.markDown(b, err.Error(), cfg.Health.FailsToDown)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		lb.markDown(b, resp.Status, cfg.Health.FailsToDown)

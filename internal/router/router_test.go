@@ -787,7 +787,7 @@ func TestRouter_XCacheHeader(t *testing.T) {
 	// The on-disk pebble cache persists between runs, so start from a clean
 	// directory — this test asserts a miss-then-hit transition that a stale
 	// entry would defeat.
-	os.RemoveAll(getUniqueTestCachePath(t))
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
 
 	cfg := createTestConfig()
 	store := createTestStore(t)
@@ -863,7 +863,7 @@ func TestRouter_XCacheHeader(t *testing.T) {
 // pinned to a DIFFERENT block is served entirely from cache — and the
 // synthesized response reproduces the upstream result byte-for-byte.
 func TestRouter_ImmutableMulticallCachedAcrossBlocks(t *testing.T) {
-	os.RemoveAll(getUniqueTestCachePath(t))
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
 	cfg := createTestConfig()
 	store := createTestStore(t)
 	defer cleanupTestStore(t, store)

@@ -183,9 +183,6 @@ func (s *Store) Get(key string) ([]byte, bool) {
 			s.mem.Add(key, e)
 			return e.Body, true
 		}
-		// NOTE: NoSync — the cache is regenerable from upstream, so durability
-		// across a crash is worthless. Forcing an fsync here would put disk
-		// latency on the request hot path.
 		_ = s.db.Delete([]byte(key), pebble.NoSync)
 	}
 
@@ -236,9 +233,8 @@ func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string, 
 	}
 	if s.db != nil {
 		buf, _ := json.Marshal(e)
-		// NoSync: see Get — the cache is regenerable, so we never pay an
-		// fsync on the request path. Pebble still flushes to disk
-		// asynchronously, which is all an ephemeral cache needs.
+		// NoSync: the cache is regenerable, so we never pay an fsync on the
+		// request path.
 		_ = s.db.Set([]byte(key), buf, pebble.NoSync)
 	}
 }
@@ -295,23 +291,109 @@ func Open(cfg CacheConfig) (*Store, error) {
 	return &Store{db: db, mem: mem, cfg: cfg}, nil
 }
 
-// ImmortalTTL is a sentinel positive TTL used to gate cache lookups for
-// entries that never expire (immutable multicall results).
-const ImmortalTTL = 100 * 365 * 24 * time.Hour
+type rpcResult struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  string          `json:"result"`
+}
 
-// PutImmortal stores an immutable multicall response with no expiry and no
-// block/reorg association — the response can never change, so it survives
-// indefinitely and across client database resets. BlockHash is left empty so
-// IsBlockHashValid never invalidates it on a reorg.
+// Lookup returns a ready-to-write JSON-RPC response for the request if it can
+// be served from cache, or ok=false to fetch upstream. A multicall of immutable
+// reads is synthesized from its per-sub-call cache; everything else uses the
+// normal keyed cache.
+func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg *SubscriptionsConfig) ([]byte, bool) {
+	if !s.cfg.Enabled {
+		return nil, false
+	}
+	if calls, ok := decodeMulticall(method, params); ok {
+		return s.serveMulticall(chain, id, calls)
+	}
+	if TTL(method, params, s.cfg, subsCfg) <= 0 {
+		return nil, false
+	}
+	key, _ := CanonicalKey(chain, method, params)
+	return s.Get(key)
+}
+
+// Store caches an upstream response: the immutable sub-calls of a multicall, or
+// a normal keyed entry whose TTL follows the method and block tag.
+func (s *Store) Store(chain, method string, params json.RawMessage, response []byte, subsCfg *SubscriptionsConfig) {
+	if !s.cfg.Enabled {
+		return
+	}
+	if calls, ok := decodeMulticall(method, params); ok {
+		s.cacheMulticallSubcalls(chain, calls, response)
+		return
+	}
+	ttl := TTL(method, params, s.cfg, subsCfg)
+	if ttl <= 0 {
+		return
+	}
+	key, _ := CanonicalKey(chain, method, params)
+	blockNum, blockHash := ExtractBlockInfo(response)
+	s.Put(key, response, ttl, chain, blockNum, blockHash)
+}
+
+// serveMulticall synthesizes a multicall response from cache, but only when
+// every sub-call is an immutable read that is already cached.
+func (s *Store) serveMulticall(chain string, id json.RawMessage, calls []call3) ([]byte, bool) {
+	results := make([]multicallResult, len(calls))
+	for i, c := range calls {
+		if !isImmutableSelector(c.CallData) {
+			return nil, false
+		}
+		body, ok := s.Get(subCallKey(chain, c.Target, c.CallData))
+		if !ok {
+			return nil, false
+		}
+		results[i] = multicallResult{Success: true, ReturnData: body}
+	}
+	out, _ := json.Marshal(rpcResult{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  fmt.Sprintf("0x%x", encodeAggregate3Result(results)),
+	})
+	return out, true
+}
+
+func (s *Store) cacheMulticallSubcalls(chain string, calls []call3, response []byte) {
+	var env struct {
+		Result string `json:"result"`
+	}
+	if json.Unmarshal(response, &env) != nil || env.Result == "" {
+		return
+	}
+	results, err := decodeAggregate3Result(env.Result)
+	if err != nil || len(results) != len(calls) {
+		return
+	}
+	for i, c := range calls {
+		if isImmutableSelector(c.CallData) && results[i].Success {
+			s.PutImmortal(subCallKey(chain, c.Target, c.CallData), results[i].ReturnData, chain)
+		}
+	}
+}
+
+// subCallKey deliberately omits the block tag: an immutable read has the same
+// result at every block, so the entry is reused across blocks and client
+// database resets.
+func subCallKey(chain string, target [20]byte, callData []byte) string {
+	h := sha256.New()
+	h.Write([]byte(chain))
+	h.Write([]byte{0})
+	h.Write(target[:])
+	h.Write([]byte{0})
+	h.Write(callData)
+	return fmt.Sprintf("sub:v1:%x", h.Sum(nil))
+}
+
+// PutImmortal stores a value that never expires and, carrying no block hash, is
+// never invalidated by a reorg.
 func (s *Store) PutImmortal(key string, body []byte, chainID string) {
 	if !s.cfg.Enabled {
 		return
 	}
-	e := entry{
-		Expiry:  math.MaxInt64,
-		Body:    body,
-		ChainID: chainID,
-	}
+	e := entry{Expiry: math.MaxInt64, Body: body, ChainID: chainID}
 	if s.mem != nil {
 		s.mem.Add(key, e)
 	}

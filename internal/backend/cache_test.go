@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -400,5 +402,114 @@ func TestStore_NegativeTTL(t *testing.T) {
 	}
 	if retrieved != nil {
 		t.Error("expected nil data with negative TTL")
+	}
+}
+
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	cfg := createUniqueTestCacheConfig(t)
+	t.Cleanup(func() { cleanupTestCache(t, cfg) })
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+func multicallParams(t *testing.T, blockTag string, calls []call3) json.RawMessage {
+	t.Helper()
+	callObj, _ := json.Marshal(map[string]string{
+		"to":   "0xca11bde05977b3631167028862be2a173976ca11",
+		"data": fmt.Sprintf("0x%x", encodeAggregate3(calls)),
+	})
+	tag, _ := json.Marshal(blockTag)
+	params, _ := json.Marshal([]json.RawMessage{callObj, tag})
+	return params
+}
+
+func multicallResponse(t *testing.T, results []multicallResult) []byte {
+	t.Helper()
+	body, _ := json.Marshal(rpcResult{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Result:  fmt.Sprintf("0x%x", encodeAggregate3Result(results)),
+	})
+	return body
+}
+
+var (
+	callDecimals = call3{Target: hexToAddress("0xaa"), CallData: []byte{0x31, 0x3c, 0xe5, 0x67}}
+	callSymbol   = call3{Target: hexToAddress("0xaa"), CallData: []byte{0x95, 0xd8, 0x9b, 0x41}}
+	callName     = call3{Target: hexToAddress("0xaa"), CallData: []byte{0x06, 0xfd, 0xde, 0x03}}
+	callSupply   = call3{Target: hexToAddress("0xaa"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}} // totalSupply
+)
+
+// TestStore_ImmutableMulticallAcrossBlocks is the cross-reset guarantee: once a
+// metadata batch is cached, an identical-content multicall pinned to a
+// different block is served from cache and carries the new request's id.
+func TestStore_ImmutableMulticallAcrossBlocks(t *testing.T) {
+	store := openTestStore(t)
+	calls := []call3{callName, callSymbol, callDecimals}
+
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`), nil); ok {
+		t.Fatal("expected a miss before the cache is populated")
+	}
+
+	name, symbol, decimals := []byte("Wrapped Ether"), []byte("WETH"), []byte{0x12}
+	store.Store("1", "eth_call", multicallParams(t, "latest", calls),
+		multicallResponse(t, []multicallResult{{true, name}, {true, symbol}, {true, decimals}}), nil)
+
+	body, ok := store.Lookup("1", "eth_call", multicallParams(t, "0x1312d00", calls), json.RawMessage(`7`), nil)
+	if !ok {
+		t.Fatal("expected a hit across a different block tag")
+	}
+
+	var resp rpcResult
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal synthesized response: %v", err)
+	}
+	if string(resp.ID) != "7" {
+		t.Fatalf("synthesized response must carry the request id, got %s", resp.ID)
+	}
+	results, err := decodeAggregate3Result(resp.Result)
+	if err != nil {
+		t.Fatalf("decode synthesized result: %v", err)
+	}
+	if len(results) != 3 || !bytes.Equal(results[0].ReturnData, name) ||
+		!bytes.Equal(results[1].ReturnData, symbol) || !bytes.Equal(results[2].ReturnData, decimals) {
+		t.Fatal("synthesized result must match the cached sub-calls")
+	}
+}
+
+func TestStore_MulticallMutableNotCached(t *testing.T) {
+	store := openTestStore(t)
+
+	supply := []call3{callSupply}
+	store.Store("1", "eth_call", multicallParams(t, "latest", supply),
+		multicallResponse(t, []multicallResult{{true, []byte{0x64}}}), nil)
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", supply), json.RawMessage(`1`), nil); ok {
+		t.Fatal("a mutable totalSupply read must never be served from cache")
+	}
+
+	store.Store("1", "eth_call", multicallParams(t, "latest", []call3{callDecimals}),
+		multicallResponse(t, []multicallResult{{true, []byte{0x12}}}), nil)
+	mixed := []call3{callDecimals, callSupply}
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", mixed), json.RawMessage(`1`), nil); ok {
+		t.Fatal("a multicall with any mutable sub-call must not be served from cache")
+	}
+}
+
+func TestStore_ImmutableMulticallSurvivesReorg(t *testing.T) {
+	store := openTestStore(t)
+	calls := []call3{callDecimals}
+	store.Store("1", "eth_call", multicallParams(t, "latest", calls),
+		multicallResponse(t, []multicallResult{{true, []byte{0x06}}}), nil)
+
+	store.UpdateLatestBlock("1", 1000, "0xabc", nil)
+	store.UpdateLatestBlock("1", 1000, "0xdifferent", nil) // reorg → in-memory purge
+
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`), nil); !ok {
+		t.Fatal("immutable sub-calls must survive a reorg purge")
 	}
 }

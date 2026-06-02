@@ -13,34 +13,35 @@ import (
 var aggregate3Selector = [4]byte{0x82, 0xad, 0x56, 0xcb}
 
 // immutableSelectors are view functions whose return value is fixed for the
-// life of the contract — they can never change response, so a result is
-// cacheable forever, independent of block. This is what lets a gusher DB
-// reset / reindex be served entirely from sabre instead of re-hammering
-// upstream for tens of thousands of token-metadata reads.
-//
-//	decimals() 0x313ce567   symbol() 0x95d89b41   name() 0x06fdde03
+// life of the contract, so their results are cached forever, independent of
+// block (see subCallKey).
 var immutableSelectors = map[[4]byte]bool{
 	{0x31, 0x3c, 0xe5, 0x67}: true, // decimals()
 	{0x95, 0xd8, 0x9b, 0x41}: true, // symbol()
 	{0x06, 0xfd, 0xde, 0x03}: true, // name()
 }
 
-// isImmutableSelector reports whether callData's 4-byte selector is an
-// immutable read whose result can be cached forever.
 func isImmutableSelector(callData []byte) bool {
 	if len(callData) < 4 {
 		return false
 	}
-	var sel [4]byte
-	copy(sel[:], callData[:4])
-	return immutableSelectors[sel]
+	return immutableSelectors[[4]byte(callData[:4])]
 }
 
-// decodeAggregate3Calls ABI-decodes an aggregate3((address,bool,bytes)[])
-// calldata payload into its inner Call3 tuples. This is the inverse of
-// encodeAggregate3 and lets sabre cache the individual immutable sub-calls
-// inside an opaque multicall blob. Returns ok=false for anything that is not
-// a well-formed aggregate3 call.
+// decodeMulticall returns the inner Call3 tuples of an eth_call that wraps a
+// Multicall3 aggregate3 batch, or ok=false for any other request.
+func decodeMulticall(method string, params json.RawMessage) ([]call3, bool) {
+	if method != "eth_call" {
+		return nil, false
+	}
+	parsed, ok := parseEthCallParams(params)
+	if !ok || parsed.Params.Data == "" {
+		return nil, false
+	}
+	return decodeAggregate3Calls(hexToBytes(parsed.Params.Data))
+}
+
+// decodeAggregate3Calls is the inverse of encodeAggregate3.
 func decodeAggregate3Calls(data []byte) ([]call3, bool) {
 	if len(data) < 4 || [4]byte{data[0], data[1], data[2], data[3]} != aggregate3Selector {
 		return nil, false
@@ -487,11 +488,8 @@ func encodeAggregate3(calls []call3) []byte {
 	return buf
 }
 
-// encodeAggregate3Result ABI-encodes the return value of aggregate3: a
-// Result[] where Result = (bool success, bytes returnData). This is the
-// inverse of decodeAggregate3Result and lets sabre synthesize a complete
-// multicall response from individually-cached immutable sub-calls, so a
-// metadata batch can be served entirely from cache with zero upstream calls.
+// encodeAggregate3Result is the inverse of decodeAggregate3Result; sabre uses
+// it to synthesize a multicall response from individually-cached sub-calls.
 func encodeAggregate3Result(results []multicallResult) []byte {
 	n := len(results)
 
