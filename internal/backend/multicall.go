@@ -300,6 +300,25 @@ func aggregateEthCalls(requests []BatchRequest, cfg MulticallConfig) ([]BatchReq
 	return out, mapping
 }
 
+// buildMulticallBody constructs a JSON-RPC eth_call request wrapping an aggregate3
+// calldata blob at the given multicall3 address and block tag — used to forward
+// only the cache-miss sub-calls of a partially-served multicall upstream.
+func buildMulticallBody(id json.RawMessage, to, blockTag string, calldata []byte) []byte {
+	callObj, _ := json.Marshal(map[string]string{
+		"to":   to,
+		"data": "0x" + hex.EncodeToString(calldata),
+	})
+	tagJSON, _ := json.Marshal(blockTag)
+	params, _ := json.Marshal([]json.RawMessage{callObj, json.RawMessage(tagJSON)})
+	body, _ := json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}{"2.0", id, "eth_call", params})
+	return body
+}
+
 // expandMulticallResponses decodes multicall aggregate3 responses and fans them
 // back out into individual responses with the original request IDs.
 func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMapping) ([]BatchResponse, error) {

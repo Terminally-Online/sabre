@@ -147,6 +147,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		var originalReqs []rpcReq
 		var cachedResponses []json.RawMessage
 		var uncachedIndices []int
+		var mcPlan *backend.MulticallPlan
 
 		if !isBatch {
 			method = req.Method
@@ -159,6 +160,15 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(cached)
 				return
+			}
+
+			// Partial multicall serving: serve the cached immutable sub-calls from
+			// the forever-cache and forward only the misses upstream as a reduced
+			// aggregate3. Keeps a single newly-discovered token from poisoning the
+			// whole batch into an upstream round-trip.
+			if plan, ok := cstore.PlanMulticall(chain, req.Method, req.Params, req.ID); ok {
+				mcPlan = plan
+				body = plan.ReducedBody
 			}
 		} else {
 			method = "batch"
@@ -342,7 +352,22 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			}
 		}
 
-		if !isBatch && status == http.StatusOK {
+		if mcPlan != nil {
+			// Reassemble the partially-served multicall: merge the cached sub-calls
+			// with the upstream misses and cache the newly-fetched immutable ones.
+			if status == http.StatusOK {
+				if full, ok := cstore.CompleteMulticall(chain, mcPlan, data); ok {
+					data = full
+				} else {
+					data, _ = json.Marshal(struct {
+						JSONRPC string          `json:"jsonrpc"`
+						ID      json.RawMessage `json:"id"`
+						Error   map[string]any  `json:"error"`
+					}{"2.0", req.ID, map[string]any{"code": -32603, "message": "multicall reassembly failed"}})
+				}
+			}
+			// On a non-OK status, data is the upstream error carrying req.ID — pass through.
+		} else if !isBatch && status == http.StatusOK {
 			cstore.Store(chain, req.Method, req.Params, data, &cfg.Subscriptions)
 		}
 

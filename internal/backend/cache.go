@@ -356,6 +356,94 @@ func (s *Store) serveMulticall(chain string, id json.RawMessage, calls []call3) 
 	return out, true
 }
 
+// MulticallPlan carries the state to satisfy an aggregate3 multicall partly from
+// cache. Cached immutable sub-calls are pre-filled in results; the rest are sent
+// upstream via ReducedBody (a smaller aggregate3) and merged back by
+// CompleteMulticall. This turns "one new token poisons the whole batch" into
+// "only the genuinely-uncached sub-calls go upstream".
+type MulticallPlan struct {
+	id          json.RawMessage
+	calls       []call3
+	results     []multicallResult
+	missIndices []int
+	// ReducedBody is the JSON-RPC eth_call body wrapping only the missing sub-calls.
+	ReducedBody []byte
+}
+
+// PlanMulticall decomposes an incoming aggregate3 multicall and serves the cached
+// immutable sub-calls from the forever-cache, returning a plan whose ReducedBody
+// contains only the cache misses. Returns ok=false when the request is not a
+// multicall, or when nothing is cached (let the normal forward+Store path run, so
+// we don't pay the decode/re-encode cost for a guaranteed full upstream trip).
+func (s *Store) PlanMulticall(chain, method string, params, id json.RawMessage) (*MulticallPlan, bool) {
+	if !s.cfg.Enabled {
+		return nil, false
+	}
+	calls, ok := decodeMulticall(method, params)
+	if !ok {
+		return nil, false
+	}
+	parsed, ok := parseEthCallParams(params)
+	if !ok {
+		return nil, false
+	}
+
+	plan := &MulticallPlan{id: id, calls: calls, results: make([]multicallResult, len(calls))}
+	var miss []call3
+	for i, c := range calls {
+		if isImmutableSelector(c.CallData) {
+			if body, ok := s.Get(subCallKey(chain, c.Target, c.CallData)); ok {
+				plan.results[i] = multicallResult{Success: true, ReturnData: body}
+				continue
+			}
+		}
+		plan.missIndices = append(plan.missIndices, i)
+		miss = append(miss, c)
+	}
+
+	// Only a genuine partial is worth the decode/re-encode: nothing cached → let the
+	// caller forward the original and Store its sub-calls; everything cached → the
+	// fully-served path (Lookup/serveMulticall) already handled it.
+	if len(miss) == 0 || len(miss) == len(calls) {
+		return nil, false
+	}
+
+	plan.ReducedBody = buildMulticallBody(id, parsed.Params.To, parsed.BlockTag, encodeAggregate3(miss))
+	return plan, true
+}
+
+// CompleteMulticall merges the upstream response for a plan's reduced (miss-only)
+// multicall back into the full result, caches the newly-fetched immutable
+// sub-calls forever, and returns the reassembled JSON-RPC response for the caller.
+func (s *Store) CompleteMulticall(chain string, plan *MulticallPlan, reducedResponse []byte) ([]byte, bool) {
+	var env struct {
+		Result string          `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(reducedResponse, &env) != nil || env.Error != nil || env.Result == "" {
+		return nil, false
+	}
+	missResults, err := decodeAggregate3Result(env.Result)
+	if err != nil || len(missResults) != len(plan.missIndices) {
+		return nil, false
+	}
+
+	for j, idx := range plan.missIndices {
+		plan.results[idx] = missResults[j]
+		c := plan.calls[idx]
+		if isImmutableSelector(c.CallData) && missResults[j].Success {
+			s.PutImmortal(subCallKey(chain, c.Target, c.CallData), missResults[j].ReturnData, chain)
+		}
+	}
+
+	out, _ := json.Marshal(rpcResult{
+		JSONRPC: "2.0",
+		ID:      plan.id,
+		Result:  fmt.Sprintf("0x%x", encodeAggregate3Result(plan.results)),
+	})
+	return out, true
+}
+
 func (s *Store) cacheMulticallSubcalls(chain string, calls []call3, response []byte) {
 	var env struct {
 		Result string `json:"result"`
