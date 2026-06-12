@@ -263,7 +263,13 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 
 			start := time.Now()
 
-			if cfg.Batch.Enabled {
+			// A partially-served multicall must forward its reduced (miss-only) body
+			// verbatim. The batch processor reconstructs the upstream request from
+			// req.Params (the ORIGINAL full multicall), ignoring body — so routing a
+			// partial through it sends the full call upstream, yielding more results
+			// than missIndices and failing CompleteMulticall's length check. Bypass
+			// the aggregator for partials and send the ReducedBody directly.
+			if cfg.Batch.Enabled && mcPlan == nil {
 				status, hdrs, data, err = processBatchRequest(cfg.BatchProcessor, bk, isBatch, req, reqs, cfg.Performance.Timeout, r, body)
 			} else {
 				status, hdrs, data, err = sendTo(r.Context(), bk, r.Header, body)
