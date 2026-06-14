@@ -289,6 +289,18 @@ ttl_latest_ms = 250
 # hot cache without storing data that you aren't actually using.
 ttl_block_ms = 86400000
 
+# Our own fully-synced Reth node, reached over the tailscale PRIVATE address
+# (never the public IP). sabre runs in the same region as the node, so this is
+# the local, unmetered hop and the primary backend. QuickNode and drpc below
+# stay as fallbacks for when the node is saturated or down. The gamma-weighted
+# load balancer prefers this backend automatically because it is the fastest.
+[reth]
+max_per_second = 100000
+
+[reth.1]
+url = "${RETH_URL}"
+ws_url = "${RETH_WS_URL}"
+
 # QuickNode is a fast, reliable, and pretty affordable Ethereum node provider.
 # At Terminally Online we run our own nodes, but QuickNode is our fallback when
 # ours is fully saturated or when we need to scale quickly. If you don't already
@@ -323,16 +335,3 @@ max_per_second = 500
 [quicknode.1]
 url = "https://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
 ws_url = "wss://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
-
-# Drpc is a decentralized RPC node provider to Ethereum, Polygon, Arbitrum and others
-# that avoid the typical concerns that exist when using centralized providers. At
-# Terminally Online we believe Drpc to be a great option for your fallback provider.
-[drpc]
-max_per_second = 40
-
-# Of course, since we have a primary node for Ethereum mainnet, we are going to provide
-# a similarly defined Drpc provider that can work alongside the primary node. Although,
-# we now have a fallback it is a much slower rate of requests and downstream throughput.
-[drpc.1]
-url = "https://eth.drpc.org"
-ws_url = "wss://eth.drpc.org"
