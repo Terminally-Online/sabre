@@ -7,10 +7,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// requireLiveNode gates the live-node integration tests behind an opt-in env var.
+// They hit a real public RPC and are inherently flaky (reachability, free-tier
+// rate limits), so they must not gate CI. Run with SABRE_LIVE_NODE_TESTS=1.
+func requireLiveNode(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SABRE_LIVE_NODE_TESTS") == "" {
+		t.Skip("set SABRE_LIVE_NODE_TESTS=1 to run live-node integration tests")
+	}
+}
 
 func TestParseEthCallParams(t *testing.T) {
 	tests := []struct {
@@ -556,6 +567,7 @@ func TestMulticallPipelineWithMulticallError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMulticallLiveNode(t *testing.T) {
+	requireLiveNode(t)
 	// Hit a real public RPC endpoint with a multicall aggregate3 call using
 	// Multicall3's own view functions, then compare against direct eth_call.
 	//
@@ -705,6 +717,7 @@ func TestMulticallLiveNode(t *testing.T) {
 }
 
 func TestMulticallLiveNodeFullPipeline(t *testing.T) {
+	requireLiveNode(t)
 	// End-to-end: use aggregateEthCalls to build the multicall, send it to a
 	// real node, expand the response, and verify each caller gets the right result.
 
