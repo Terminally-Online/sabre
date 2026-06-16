@@ -15,6 +15,29 @@ func decimalsReturn(v byte) []byte {
 	return out
 }
 
+// TestImmutableSelectors covers the view functions whose results are cached
+// forever — including a pair's token0/token1, which are constructor-fixed.
+func TestImmutableSelectors(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"decimals()", []byte{0x31, 0x3c, 0xe5, 0x67}, true},
+		{"symbol()", []byte{0x95, 0xd8, 0x9b, 0x41}, true},
+		{"name()", []byte{0x06, 0xfd, 0xde, 0x03}, true},
+		{"token0()", []byte{0x0d, 0xfe, 0x16, 0x81}, true},
+		{"token1()", []byte{0xd2, 0x12, 0x20, 0xa7}, true},
+		{"balanceOf(addr)", []byte{0x70, 0xa0, 0x82, 0x31}, false},
+		{"short", []byte{0x0d, 0xfe}, false},
+	}
+	for _, tc := range cases {
+		if got := isImmutableSelector(tc.data); got != tc.want {
+			t.Errorf("isImmutableSelector(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestPartialMulticallServing verifies the core fix: a multicall of cached +
 // uncached immutable sub-calls forwards ONLY the misses upstream, then merges the
 // full result back in order and caches the newly-fetched ones.

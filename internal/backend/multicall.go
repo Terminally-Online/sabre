@@ -19,6 +19,8 @@ var immutableSelectors = map[[4]byte]bool{
 	{0x31, 0x3c, 0xe5, 0x67}: true, // decimals()
 	{0x95, 0xd8, 0x9b, 0x41}: true, // symbol()
 	{0x06, 0xfd, 0xde, 0x03}: true, // name()
+	{0x0d, 0xfe, 0x16, 0x81}: true, // token0() — set in a pair's constructor
+	{0xd2, 0x12, 0x20, 0xa7}: true, // token1() — set in a pair's constructor
 }
 
 func isImmutableSelector(callData []byte) bool {
