@@ -100,3 +100,58 @@ func TestPartialMulticallServing(t *testing.T) {
 		t.Fatal("fully-cached multicall should not need a partial plan")
 	}
 }
+
+// TestNegativeMulticallCaching verifies that an immutable sub-call which reverts
+// upstream is recorded in the bounded negative cache, then served back as a
+// failure without re-querying the node — the counterfactual-deployment case where
+// an immutable view exists on no contract yet.
+func TestNegativeMulticallCaching(t *testing.T) {
+	store := openTestStore(t)
+	const chain = "1"
+	a, b := decimalsOn("0xaa"), decimalsOn("0xbb")
+
+	// A is cached (6); B is unknown and will revert upstream.
+	store.PutImmortal(subCallKey(chain, a.Target, a.CallData), decimalsReturn(6), chain)
+
+	id := json.RawMessage(`9`)
+	plan, ok := store.PlanMulticall(chain, "eth_call", multicallParams(t, "latest", []call3{a, b}), id)
+	if !ok {
+		t.Fatal("expected a partial plan (A cached; B missing)")
+	}
+
+	// Upstream reverts B.
+	if _, ok := store.CompleteMulticall(chain, plan,
+		multicallResponse(t, []multicallResult{{Success: false}})); !ok {
+		t.Fatal("CompleteMulticall failed")
+	}
+
+	if !store.negativeCached(chain, b.Target, b.CallData) {
+		t.Fatal("B's revert should be recorded in the negative cache")
+	}
+
+	// The whole multicall now serves from cache: A as success, B as failure, with
+	// no upstream forward.
+	full, served := store.serveMulticall(chain, id, []call3{a, b})
+	if !served {
+		t.Fatal("after completion the batch should serve fully from cache")
+	}
+	var env struct {
+		Result string `json:"result"`
+	}
+	_ = json.Unmarshal(full, &env)
+	res, err := decodeAggregate3Result(env.Result)
+	if err != nil || len(res) != 2 {
+		t.Fatalf("full result decode: %v (n=%d)", err, len(res))
+	}
+	if !res[0].Success || res[0].ReturnData[31] != 6 {
+		t.Fatalf("result[0] should be success=6, got success=%v val=%d", res[0].Success, res[0].ReturnData[31])
+	}
+	if res[1].Success {
+		t.Fatal("result[1] should be served as a failure from the negative cache")
+	}
+
+	// A fresh plan needs no forward: A is cached, B is negatively cached.
+	if _, ok := store.PlanMulticall(chain, "eth_call", multicallParams(t, "latest", []call3{a, b}), id); ok {
+		t.Fatal("cached + negatively-cached multicall should not need a partial plan")
+	}
+}
