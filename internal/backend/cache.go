@@ -342,11 +342,15 @@ func (s *Store) serveMulticall(chain string, id json.RawMessage, calls []call3) 
 		if !isImmutableSelector(c.CallData) {
 			return nil, false
 		}
-		body, ok := s.Get(subCallKey(chain, c.Target, c.CallData))
-		if !ok {
-			return nil, false
+		if body, ok := s.Get(subCallKey(chain, c.Target, c.CallData)); ok {
+			results[i] = multicallResult{Success: true, ReturnData: body}
+			continue
 		}
-		results[i] = multicallResult{Success: true, ReturnData: body}
+		if s.negativeCached(chain, c.Target, c.CallData) {
+			results[i] = multicallResult{Success: false}
+			continue
+		}
+		return nil, false
 	}
 	out, _ := json.Marshal(rpcResult{
 		JSONRPC: "2.0",
@@ -396,6 +400,10 @@ func (s *Store) PlanMulticall(chain, method string, params, id json.RawMessage) 
 				plan.results[i] = multicallResult{Success: true, ReturnData: body}
 				continue
 			}
+			if s.negativeCached(chain, c.Target, c.CallData) {
+				plan.results[i] = multicallResult{Success: false}
+				continue
+			}
 		}
 		plan.missIndices = append(plan.missIndices, i)
 		miss = append(miss, c)
@@ -431,8 +439,13 @@ func (s *Store) CompleteMulticall(chain string, plan *MulticallPlan, reducedResp
 	for j, idx := range plan.missIndices {
 		plan.results[idx] = missResults[j]
 		c := plan.calls[idx]
-		if isImmutableSelector(c.CallData) && missResults[j].Success {
+		if !isImmutableSelector(c.CallData) {
+			continue
+		}
+		if missResults[j].Success {
 			s.PutImmortal(subCallKey(chain, c.Target, c.CallData), missResults[j].ReturnData, chain)
+		} else {
+			s.putNegative(chain, c.Target, c.CallData)
 		}
 	}
 
@@ -456,8 +469,13 @@ func (s *Store) cacheMulticallSubcalls(chain string, calls []call3, response []b
 		return
 	}
 	for i, c := range calls {
-		if isImmutableSelector(c.CallData) && results[i].Success {
+		if !isImmutableSelector(c.CallData) {
+			continue
+		}
+		if results[i].Success {
 			s.PutImmortal(subCallKey(chain, c.Target, c.CallData), results[i].ReturnData, chain)
+		} else {
+			s.putNegative(chain, c.Target, c.CallData)
 		}
 	}
 }
@@ -473,6 +491,47 @@ func subCallKey(chain string, target [20]byte, callData []byte) string {
 	h.Write([]byte{0})
 	h.Write(callData)
 	return fmt.Sprintf("sub:v1:%x", h.Sum(nil))
+}
+
+// subCallNegKey namespaces the negative cache for an immutable read that reverts.
+func subCallNegKey(chain string, target [20]byte, callData []byte) string {
+	h := sha256.New()
+	h.Write([]byte(chain))
+	h.Write([]byte{0})
+	h.Write(target[:])
+	h.Write([]byte{0})
+	h.Write(callData)
+	return fmt.Sprintf("sub:neg:v1:%x", h.Sum(nil))
+}
+
+// putNegative records that an immutable selector reverted for a target. Block-
+// independent like the success cache (no block hash → never reorg-invalidated),
+// but MORTAL: bounded to cfg.TTLBlock so a counterfactually-deployed address —
+// no code now, code later via CREATE2 — is re-checked when the entry lapses
+// instead of stranded on a stale negative forever.
+func (s *Store) putNegative(chain string, target [20]byte, callData []byte) {
+	if !s.cfg.Enabled || s.cfg.TTLBlock <= 0 {
+		return
+	}
+	e := entry{Expiry: time.Now().Add(s.cfg.TTLBlock).UnixMilli(), ChainID: chain}
+	key := subCallNegKey(chain, target, callData)
+	if s.mem != nil {
+		s.mem.Add(key, e)
+	}
+	if s.db != nil {
+		buf, _ := json.Marshal(e)
+		_ = s.db.Set([]byte(key), buf, pebble.NoSync)
+	}
+}
+
+// negativeCached reports whether an immutable selector is known (within the
+// negative-cache window) to revert for the target.
+func (s *Store) negativeCached(chain string, target [20]byte, callData []byte) bool {
+	if !s.cfg.Enabled {
+		return false
+	}
+	_, ok := s.Get(subCallNegKey(chain, target, callData))
+	return ok
 }
 
 // PutImmortal stores a value that never expires and, carrying no block hash, is
