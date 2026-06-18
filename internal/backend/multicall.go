@@ -30,6 +30,33 @@ func isImmutableSelector(callData []byte) bool {
 	return immutableSelectors[[4]byte(callData[:4])]
 }
 
+// decodeImmutableCall returns the target and calldata of a standalone eth_call to
+// an immutable view function (see immutableSelectors), or ok=false otherwise. It
+// rejects calls carrying state overrides or execution-context modifiers
+// (from/value/gas): their result is not a pure function of the contract, so it
+// must never share the block-agnostic forever-cache. This is the standalone
+// counterpart to decodeMulticall's per-sub-call immutable handling — an immutable
+// read is immutable whether wrapped in aggregate3 or sent directly, and both
+// share subCallKey entries.
+func decodeImmutableCall(method string, params json.RawMessage) ([20]byte, []byte, bool) {
+	var zero [20]byte
+	if method != "eth_call" {
+		return zero, nil, false
+	}
+	parsed, ok := parseEthCallParams(params)
+	if !ok || parsed.Params.To == "" || parsed.Params.Data == "" {
+		return zero, nil, false
+	}
+	if parsed.HasStateOverrides || parsed.Params.From != "" || parsed.Params.Value != "" || parsed.Params.Gas != "" || parsed.Params.GasPrice != "" {
+		return zero, nil, false
+	}
+	callData := hexToBytes(parsed.Params.Data)
+	if !isImmutableSelector(callData) {
+		return zero, nil, false
+	}
+	return hexToAddress(parsed.Params.To), callData, true
+}
+
 // decodeMulticall returns the inner Call3 tuples of an eth_call that wraps a
 // Multicall3 aggregate3 batch, or ok=false for any other request.
 func decodeMulticall(method string, params json.RawMessage) ([]call3, bool) {

@@ -513,3 +513,84 @@ func TestStore_ImmutableMulticallSurvivesReorg(t *testing.T) {
 		t.Fatal("immutable sub-calls must survive a reorg purge")
 	}
 }
+
+func TestStore_StandaloneImmutableForeverCache(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	chain := "1"
+	token := "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+	// eth_call decimals() at latest
+	params := json.RawMessage(fmt.Sprintf(`[{"to":%q,"data":"0x313ce567"},"latest"]`, token))
+	id := json.RawMessage(`1`)
+	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000006"}`)
+
+	if _, ok := store.Lookup(chain, "eth_call", params, id, nil); ok {
+		t.Fatal("expected miss before store")
+	}
+	store.Store(chain, "eth_call", params, resp, nil)
+
+	// Served from forever-cache even past TTLLatest.
+	time.Sleep(300 * time.Millisecond)
+	got, ok := store.Lookup(chain, "eth_call", params, id, nil)
+	if !ok {
+		t.Fatal("expected hit after store (immortal, past TTLLatest)")
+	}
+	if !bytes.Contains(got, []byte("0x0000000000000000000000000000000000000000000000000000000000000006")) {
+		t.Fatalf("wrong served body: %s", got)
+	}
+
+	// Shares the key with the multicall sub-call path: a standalone store warms
+	// an aggregate3 read of the same (target, selector).
+	calls, _ := decodeAggregate3Calls(hexToBytes("0x82ad56cb" +
+		"0000000000000000000000000000000000000000000000000000000000000020" +
+		"0000000000000000000000000000000000000000000000000000000000000001" +
+		"0000000000000000000000000000000000000000000000000000000000000020" +
+		"000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" +
+		"0000000000000000000000000000000000000000000000000000000000000001" +
+		"0000000000000000000000000000000000000000000000000000000000000060" +
+		"0000000000000000000000000000000000000000000000000000000000000004" +
+		"313ce56700000000000000000000000000000000000000000000000000000000"))
+	if _, ok := store.serveMulticall(chain, id, calls); !ok {
+		t.Fatal("standalone store should warm the multicall sub-call cache (shared key)")
+	}
+}
+
+func TestStore_StandaloneImmutableRevertNegativeCacheOnlyCode3(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	chain := "1"
+	mk := func(addr string) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`[{"to":%q,"data":"0x313ce567"},"latest"]`, addr))
+	}
+	id := json.RawMessage(`1`)
+
+	// Transient error must NOT poison.
+	transient := "0x1111111111111111111111111111111111111111"
+	store.Store(chain, "eth_call", mk(transient), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"timeout"}}`), nil)
+	if _, ok := store.Lookup(chain, "eth_call", mk(transient), id, nil); ok {
+		t.Fatal("transient error must not be cached")
+	}
+
+	// Genuine revert (code 3) negative-caches and is served without upstream.
+	reverter := "0x2222222222222222222222222222222222222222"
+	store.Store(chain, "eth_call", mk(reverter), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`), nil)
+	got, ok := store.Lookup(chain, "eth_call", mk(reverter), id, nil)
+	if !ok {
+		t.Fatal("code-3 revert should be negative-cached and served")
+	}
+	if !bytes.Contains(got, []byte("execution reverted")) {
+		t.Fatalf("expected revert response, got %s", got)
+	}
+}

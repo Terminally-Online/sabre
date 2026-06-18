@@ -308,6 +308,16 @@ func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg
 	if calls, ok := decodeMulticall(method, params); ok {
 		return s.serveMulticall(chain, id, calls)
 	}
+	if target, callData, ok := decodeImmutableCall(method, params); ok {
+		if body, ok := s.Get(subCallKey(chain, target, callData)); ok {
+			out, _ := json.Marshal(rpcResult{JSONRPC: "2.0", ID: id, Result: fmt.Sprintf("0x%x", body)})
+			return out, true
+		}
+		if s.negativeCached(chain, target, callData) {
+			return rpcRevertResponse(id), true
+		}
+		return nil, false
+	}
 	if TTL(method, params, s.cfg, subsCfg) <= 0 {
 		return nil, false
 	}
@@ -325,6 +335,10 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 		s.cacheMulticallSubcalls(chain, calls, response)
 		return
 	}
+	if target, callData, ok := decodeImmutableCall(method, params); ok {
+		s.cacheImmutableCall(chain, target, callData, response)
+		return
+	}
 	ttl := TTL(method, params, s.cfg, subsCfg)
 	if ttl <= 0 {
 		return
@@ -332,6 +346,45 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 	key, _ := CanonicalKey(chain, method, params)
 	blockNum, blockHash := ExtractBlockInfo(response)
 	s.Put(key, response, ttl, chain, blockNum, blockHash)
+}
+
+// rpcRevertResponse builds the canonical execution-reverted error response used
+// to serve a standalone immutable read known (within the negative-cache window)
+// to revert, sparing an upstream round-trip.
+func rpcRevertResponse(id json.RawMessage) []byte {
+	out, _ := json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   map[string]any  `json:"error"`
+	}{"2.0", id, map[string]any{"code": 3, "message": "execution reverted"}})
+	return out
+}
+
+// cacheImmutableCall stores an upstream response to a standalone immutable read
+// under the same block-agnostic key as the multicall sub-call cache, so the two
+// paths share entries. A success is stored forever; only a genuine execution
+// revert (code 3) is negative-cached — transient upstream errors must not poison
+// a real contract for the negative-cache window.
+func (s *Store) cacheImmutableCall(chain string, target [20]byte, callData []byte, response []byte) {
+	var r struct {
+		Result *string         `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(response, &r); err != nil {
+		return
+	}
+	if r.Result != nil {
+		s.PutImmortal(subCallKey(chain, target, callData), hexToBytes(*r.Result), chain)
+		return
+	}
+	if len(r.Error) > 0 {
+		var e struct {
+			Code int `json:"code"`
+		}
+		if json.Unmarshal(r.Error, &e) == nil && e.Code == 3 {
+			s.putNegative(chain, target, callData)
+		}
+	}
 }
 
 // serveMulticall synthesizes a multicall response from cache, but only when
