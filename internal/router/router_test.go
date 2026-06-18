@@ -951,3 +951,36 @@ func TestRouter_ImmutableMulticallCachedAcrossBlocks(t *testing.T) {
 		t.Fatalf("synthesized result mismatch:\n upstream=%s\n cached  =%s", r1.Result, r2.Result)
 	}
 }
+
+// TestWriteHopSafeHeaders_StripsBodyDescriptors guards the multicall-merge EOF bug:
+// sabre rewrites the body on cached/merged/passthrough paths, so copying the
+// upstream Content-Length/Content-Encoding strands a stale length on a transformed
+// body and truncates the write. Both must be dropped so net/http recomputes them.
+func TestWriteHopSafeHeaders_StripsBodyDescriptors(t *testing.T) {
+	src := http.Header{}
+	src.Set("Content-Length", "37350") // upstream reduced-multicall length
+	src.Set("Content-Encoding", "gzip")
+	src.Set("Content-Type", "application/json")
+	src.Set("X-Upstream-Thing", "keep-me")
+	src.Set("Connection", "keep-alive") // hop-by-hop, also dropped
+
+	rec := httptest.NewRecorder()
+	writeHopSafeHeaders(rec, src)
+	h := rec.Header()
+
+	if got := h.Get("Content-Length"); got != "" {
+		t.Errorf("Content-Length must be stripped, got %q", got)
+	}
+	if got := h.Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding must be stripped, got %q", got)
+	}
+	if got := h.Get("Connection"); got != "" {
+		t.Errorf("Connection (hop-by-hop) must be stripped, got %q", got)
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type must pass through, got %q", got)
+	}
+	if got := h.Get("X-Upstream-Thing"); got != "keep-me" {
+		t.Errorf("end-to-end headers must pass through, got %q", got)
+	}
+}

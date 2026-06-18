@@ -437,7 +437,8 @@ func writeHopSafeHeaders(dst http.ResponseWriter, src http.Header) {
 		kl := strings.ToLower(k)
 		switch kl {
 		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-			"te", "trailers", "transfer-encoding", "upgrade":
+			"te", "trailers", "transfer-encoding", "upgrade",
+			"content-length", "content-encoding":
 			continue
 		}
 		for _, v := range vv {
