@@ -1200,9 +1200,12 @@ func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // newEchoBackend returns a healthy mock backend whose upstream answers every
 // request with a result identifying the request's method and params, and
 // returns batch responses in a SHUFFLED order — spec-legal upstream behavior
-// that exposes any positional or id-keyed response misrouting.
+// that exposes any positional or id-keyed response misrouting. The shuffle is
+// deterministically seeded so runs are reproducible.
 func newEchoBackend(t *testing.T) *backend.Backend {
 	t.Helper()
+	var shuffleMu sync.Mutex
+	shuffleRng := mrand.New(mrand.NewPCG(0x5ab3e, 0xc0ffee))
 	bk := backend.CreateMockBackend("echo", "ethereum", "https://echo.example.com")
 	bk.HealthUp.Store(true)
 	bk.Client = &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -1232,7 +1235,9 @@ func newEchoBackend(t *testing.T) *backend.Backend {
 			for i, m := range batch {
 				resps[i] = respond(m)
 			}
-			mrand.Shuffle(len(resps), func(i, j int) { resps[i], resps[j] = resps[j], resps[i] })
+			shuffleMu.Lock()
+			shuffleRng.Shuffle(len(resps), func(i, j int) { resps[i], resps[j] = resps[j], resps[i] })
+			shuffleMu.Unlock()
 			out, _ = json.Marshal(resps)
 		} else {
 			var single rpcMsg
@@ -1437,4 +1442,171 @@ func TestRouter_BatchUpstreamOutOfOrderResponses(t *testing.T) {
 			}
 		}
 	}
+}
+
+// newRevertingBackend returns a healthy mock backend whose upstream answers
+// eth_call with a legitimate JSON-RPC execution-revert error (code 3 with
+// revert data) and every other method with a plain result.
+func newRevertingBackend(t *testing.T) *backend.Backend {
+	t.Helper()
+	bk := backend.CreateMockBackend("reverter", "ethereum", "https://reverter.example.com")
+	bk.HealthUp.Store(true)
+	bk.Client = &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		type rpcMsg struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		respond := func(m rpcMsg) json.RawMessage {
+			if m.Method == "eth_call" {
+				out, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      m.ID,
+					"error": map[string]any{
+						"code":    3,
+						"message": "execution reverted: probe failed",
+						"data":    "0x08c379a00000000000000000000000000000000000000000000000000000000000000020",
+					},
+				})
+				return out
+			}
+			out, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": "0x1"})
+			return out
+		}
+		var out []byte
+		var batch []rpcMsg
+		if json.Unmarshal(body, &batch) == nil {
+			resps := make([]json.RawMessage, len(batch))
+			for i, m := range batch {
+				resps[i] = respond(m)
+			}
+			out, _ = json.Marshal(resps)
+		} else {
+			var single rpcMsg
+			if err := json.Unmarshal(body, &single); err != nil {
+				return nil, err
+			}
+			out = respond(single)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+			Request:    r,
+		}, nil
+	})}
+	return bk
+}
+
+// TestRouter_BatchedEthCallRevertReturnsErrorEnvelope guards revert fidelity
+// through the batch processor: a legitimate eth_call revert must reach the
+// caller as an HTTP 200 JSON-RPC error envelope with code/message/data intact
+// — never be converted into a transport failure and retried into a 502.
+func TestRouter_BatchedEthCallRevertReturnsErrorEnvelope(t *testing.T) {
+	cfg := createTestConfig()
+	cfg.Cache.Enabled = false
+	cfg.Batch.Enabled = true
+	cfg.Batch.MaxBatchSize = 10
+	cfg.Batch.MaxBatchWaitTime = 5 * time.Millisecond
+	cfg.BatchProcessor = backend.NewBatchProcessor(10, 5*time.Millisecond, 4, 1, backend.MulticallConfig{})
+	cfg.Backends = []*backend.Backend{newRevertingBackend(t)}
+	cfg.BackendsCt = map[string]int{"ethereum": 1}
+
+	storeCfg := backend.CacheConfig{Enabled: false, Path: getUniqueTestCachePath(t)}
+	store, err := backend.Open(storeCfg)
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer cleanupTestStore(t, store)
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	assertRevertEnvelope := func(t *testing.T, raw json.RawMessage, wantID string) {
+		t.Helper()
+		var resp struct {
+			ID     json.RawMessage `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Data    string `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("response is not a JSON-RPC envelope: %v\nbody: %s", err, raw)
+		}
+		if string(resp.ID) != wantID {
+			t.Errorf("id %s, want %s", resp.ID, wantID)
+		}
+		if resp.Error.Code != 3 {
+			t.Errorf("error code %d, want 3", resp.Error.Code)
+		}
+		if resp.Error.Message != "execution reverted: probe failed" {
+			t.Errorf("error message %q, want revert message", resp.Error.Message)
+		}
+		if resp.Error.Data != "0x08c379a00000000000000000000000000000000000000000000000000000000000000020" {
+			t.Errorf("error data %q: revert data lost", resp.Error.Data)
+		}
+	}
+
+	t.Run("single", func(t *testing.T) {
+		body := []byte(`{"jsonrpc":"2.0","id":7,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001","data":"0x01"},"latest"]}`)
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200 (revert must not become a transport error); body: %s", w.Code, w.Body.String())
+		}
+		assertRevertEnvelope(t, w.Body.Bytes(), "7")
+	})
+
+	t.Run("batch mixed", func(t *testing.T) {
+		body := []byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001","data":"0x01"},"latest"]},{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}]`)
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body: %s", w.Code, w.Body.String())
+		}
+		var responses []json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &responses); err != nil || len(responses) != 2 {
+			t.Fatalf("bad batch response: %v %s", err, w.Body.String())
+		}
+		assertRevertEnvelope(t, responses[0], "1")
+		var ok struct {
+			ID     json.RawMessage `json:"id"`
+			Result json.RawMessage `json:"result"`
+		}
+		if err := json.Unmarshal(responses[1], &ok); err != nil || string(ok.Result) != `"0x1"` {
+			t.Errorf("healthy neighbor disturbed: %s", responses[1])
+		}
+	})
+
+	t.Run("batch all reverting", func(t *testing.T) {
+		body := []byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001","data":"0x01"},"latest"]},{"jsonrpc":"2.0","id":2,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000002","data":"0x02"},"latest"]}]`)
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200 (all-revert batch must not become a transport error); body: %s", w.Code, w.Body.String())
+		}
+		var responses []json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &responses); err != nil || len(responses) != 2 {
+			t.Fatalf("bad batch response: %v %s", err, w.Body.String())
+		}
+		assertRevertEnvelope(t, responses[0], "1")
+		assertRevertEnvelope(t, responses[1], "2")
+	})
 }

@@ -32,6 +32,13 @@ type BatchResponse struct {
 	ID      json.RawMessage `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   json.RawMessage `json:"error,omitempty"`
+
+	// InternalErr marks a response synthesized by the batch processor for a
+	// transport or protocol failure (send failed, upstream dropped the
+	// response). It is never set on an error the upstream itself returned —
+	// a legitimate JSON-RPC error such as an eth_call revert must reach the
+	// caller as an error envelope, not be retried as a failed request.
+	InternalErr error `json:"-"`
 }
 
 // HasError reports whether the response carries a JSON-RPC error object.
@@ -200,9 +207,10 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 	if err != nil {
 		for _, e := range entries {
 			e.ch <- BatchResponse{
-				JSONRPC: "2.0",
-				ID:      e.req.ID,
-				Error:   rawJSON(map[string]any{"code": -32603, "message": "Internal error: " + err.Error()}),
+				JSONRPC:     "2.0",
+				ID:          e.req.ID,
+				Error:       rawJSON(map[string]any{"code": -32603, "message": "Internal error: " + err.Error()}),
+				InternalErr: err,
 			}
 		}
 		return
@@ -226,12 +234,15 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 			continue
 		}
 		e.ch <- BatchResponse{
-			JSONRPC: "2.0",
-			ID:      e.req.ID,
-			Error:   rawJSON(map[string]any{"code": -32603, "message": "Internal error: upstream batch response missing"}),
+			JSONRPC:     "2.0",
+			ID:          e.req.ID,
+			Error:       rawJSON(map[string]any{"code": -32603, "message": "Internal error: upstream batch response missing"}),
+			InternalErr: errMissingUpstreamResponse,
 		}
 	}
 }
+
+var errMissingUpstreamResponse = errors.New("upstream batch response missing")
 
 // parseWireID decodes a positional wire id assigned by processBatch. Upstreams
 // must echo ids verbatim, but a quoted echo is tolerated.

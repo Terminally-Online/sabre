@@ -571,15 +571,19 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 			}
 		}
 
+		// Only processor-synthesized transport failures count against the
+		// upstream: a legitimate JSON-RPC error (an eth_call revert carries
+		// code/message/data the caller depends on) is a successful delivery
+		// and must be returned as its error envelope, never retried.
 		allFailed := len(responses) > 0
 		for _, resp := range responses {
-			if !resp.HasError() {
+			if resp.InternalErr == nil {
 				allFailed = false
 				break
 			}
 		}
 		if allFailed {
-			return 0, nil, nil, fmt.Errorf("all %d batch responses returned errors", len(responses))
+			return 0, nil, nil, fmt.Errorf("all %d batch responses failed: %w", len(responses), responses[0].InternalErr)
 		}
 
 		data, err = json.Marshal(responses)
@@ -603,8 +607,8 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 
 		select {
 		case resp := <-responseChan:
-			if resp.HasError() {
-				return 0, nil, nil, fmt.Errorf("batch response error: %s", string(resp.Error))
+			if resp.InternalErr != nil {
+				return 0, nil, nil, fmt.Errorf("batch response error: %w", resp.InternalErr)
 			}
 			data, err = json.Marshal(resp)
 			if err != nil {
