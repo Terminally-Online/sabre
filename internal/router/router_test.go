@@ -944,7 +944,9 @@ func TestRouter_ImmutableMulticallCachedAcrossBlocks(t *testing.T) {
 	}
 
 	// The synthesized result must reproduce the upstream result exactly.
-	var r1, r2 struct{ Result string `json:"result"` }
+	var r1, r2 struct {
+		Result string `json:"result"`
+	}
 	_ = json.Unmarshal(w1.Body.Bytes(), &r1)
 	_ = json.Unmarshal(w2.Body.Bytes(), &r2)
 	if r2.Result != r1.Result || r2.Result != resultHex {
@@ -982,5 +984,207 @@ func TestWriteHopSafeHeaders_StripsBodyDescriptors(t *testing.T) {
 	}
 	if got := h.Get("X-Upstream-Thing"); got != "keep-me" {
 		t.Errorf("end-to-end headers must pass through, got %q", got)
+	}
+}
+
+// TestRouter_CacheHitServesCurrentRequestID guards against cache id leakage on
+// the single-request path: the first client's response is cached with its id
+// embedded, and the second client — same call, different id — must receive the
+// cached result stamped with ITS OWN id, not the original requester's.
+func TestRouter_CacheHitServesCurrentRequestID(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	mockResponse := `{"jsonrpc":"2.0","id":1,"result":"0x1234"}`
+	for _, b := range cfg.Backends {
+		b.HealthUp.Store(true)
+		mc := b.Client.Transport.(*backend.MockHTTPClient)
+		mc.ClearRequests()
+		mc.SetResponse(b.URL.String(), backend.MockResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(mockResponse),
+		})
+	}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	do := func(id any) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"method":  "eth_getBlockByNumber",
+			"params":  []any{"0x1", false},
+		})
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		return w
+	}
+
+	w1 := do(1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first client: status = %d, want 200", w1.Code)
+	}
+	if got := w1.Header().Get("X-Cache"); got != "miss" {
+		t.Fatalf("first client: X-Cache = %q, want miss", got)
+	}
+
+	w2 := do("client-two")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second client: status = %d, want 200", w2.Code)
+	}
+	if got := w2.Header().Get("X-Cache"); got != "hit" {
+		t.Fatalf("second client: X-Cache = %q, want hit", got)
+	}
+
+	var resp struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", w2.Body.String(), err)
+	}
+	if string(resp.ID) != `"client-two"` {
+		t.Errorf("second client got id %s, want %q", resp.ID, `"client-two"`)
+	}
+	if string(resp.Result) != `"0x1234"` {
+		t.Errorf("second client got result %s, want %q", resp.Result, `"0x1234"`)
+	}
+}
+
+// TestRouter_BatchCacheHitServesCurrentRequestIDs guards the batch path: a
+// batch with a mixed cache hit and miss must preserve the positional id
+// mapping, with the hit stamped with the CURRENT batch item's id rather than
+// the id of whichever client originally populated the cache entry.
+func TestRouter_BatchCacheHitServesCurrentRequestIDs(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	// Another client populated the cache entry under its own id.
+	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x1",false]`),
+		[]byte(`{"jsonrpc":"2.0","id":"original-client","result":"0xcafe"}`), &cfg.Subscriptions)
+
+	// Upstream serves only the reduced (miss-only) batch: the eth_blockNumber item.
+	upstreamBody := `[{"jsonrpc":"2.0","id":8,"result":"0x10"}]`
+	for _, b := range cfg.Backends {
+		b.HealthUp.Store(true)
+		mc := b.Client.Transport.(*backend.MockHTTPClient)
+		mc.ClearRequests()
+		mc.SetResponse(b.URL.String(), backend.MockResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(upstreamBody),
+		})
+	}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	body, _ := json.Marshal([]map[string]any{
+		{"jsonrpc": "2.0", "id": 7, "method": "eth_getBlockByNumber", "params": []any{"0x1", false}},
+		{"jsonrpc": "2.0", "id": 8, "method": "eth_blockNumber", "params": []any{}},
+	})
+	req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("batch: status = %d, want 200. body: %s", w.Code, w.Body.String())
+	}
+
+	var responses []struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &responses); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", w.Body.String(), err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("batch returned %d responses, want 2. body: %s", len(responses), w.Body.String())
+	}
+
+	if string(responses[0].ID) != `7` {
+		t.Errorf("cached item id = %s, want 7", responses[0].ID)
+	}
+	if string(responses[0].Result) != `"0xcafe"` {
+		t.Errorf("cached item result = %s, want %q", responses[0].Result, `"0xcafe"`)
+	}
+	if string(responses[1].ID) != `8` {
+		t.Errorf("uncached item id = %s, want 8", responses[1].ID)
+	}
+	if string(responses[1].Result) != `"0x10"` {
+		t.Errorf("uncached item result = %s, want %q", responses[1].Result, `"0x10"`)
+	}
+}
+
+// TestRouter_BatchAllCachedServesCurrentRequestIDs covers the fully-cached
+// batch short-circuit, which serves cachedResponses without any upstream trip.
+func TestRouter_BatchAllCachedServesCurrentRequestIDs(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x1",false]`),
+		[]byte(`{"jsonrpc":"2.0","id":"a","result":"0xcafe"}`), &cfg.Subscriptions)
+	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x2",false]`),
+		[]byte(`{"jsonrpc":"2.0","id":"b","result":"0xbeef"}`), &cfg.Subscriptions)
+
+	for _, b := range cfg.Backends {
+		b.HealthUp.Store(true)
+		b.Client.Transport.(*backend.MockHTTPClient).ClearRequests()
+	}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	body, _ := json.Marshal([]map[string]any{
+		{"jsonrpc": "2.0", "id": 101, "method": "eth_getBlockByNumber", "params": []any{"0x1", false}},
+		{"jsonrpc": "2.0", "id": 102, "method": "eth_getBlockByNumber", "params": []any{"0x2", false}},
+	})
+	req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("batch: status = %d, want 200. body: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Cache"); got != "hit" {
+		t.Fatalf("batch: X-Cache = %q, want hit", got)
+	}
+
+	var responses []struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &responses); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", w.Body.String(), err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("batch returned %d responses, want 2. body: %s", len(responses), w.Body.String())
+	}
+	if string(responses[0].ID) != `101` || string(responses[0].Result) != `"0xcafe"` {
+		t.Errorf("item 0 = (id %s, result %s), want (101, %q)", responses[0].ID, responses[0].Result, `"0xcafe"`)
+	}
+	if string(responses[1].ID) != `102` || string(responses[1].Result) != `"0xbeef"` {
+		t.Errorf("item 1 = (id %s, result %s), want (102, %q)", responses[1].ID, responses[1].Result, `"0xbeef"`)
+	}
+
+	for _, b := range cfg.Backends {
+		if n := len(b.Client.Transport.(*backend.MockHTTPClient).GetRequests()); n != 0 {
+			t.Errorf("fully-cached batch reached upstream %s %d times, want 0", b.Name, n)
+		}
 	}
 }

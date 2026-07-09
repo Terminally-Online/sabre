@@ -594,3 +594,129 @@ func TestStore_StandaloneImmutableRevertNegativeCacheOnlyCode3(t *testing.T) {
 		t.Fatalf("expected revert response, got %s", got)
 	}
 }
+
+// TestStore_LookupRewritesResponseID guards the shared keyed cache against id
+// leakage: a response cached under one client's id must be served to every
+// subsequent client under THAT client's id, or id-matched JSON-RPC clients
+// misroute values across calls.
+func TestStore_LookupRewritesResponseID(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("Open(%+v) error = %v", cfg, err)
+	}
+	defer store.Close()
+
+	params := json.RawMessage(`["0x1",false]`)
+	store.Store("ethereum", "eth_getBlockByNumber", params, []byte(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`), nil)
+
+	tests := []struct {
+		name   string
+		id     json.RawMessage
+		wantID string
+	}{
+		{name: "numeric id", id: json.RawMessage(`42`), wantID: `42`},
+		{name: "string id", id: json.RawMessage(`"client-b"`), wantID: `"client-b"`},
+		{name: "null id", id: json.RawMessage(`null`), wantID: `null`},
+		{name: "absent id", id: nil, wantID: `null`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, ok := store.Lookup("ethereum", "eth_getBlockByNumber", params, tt.id, nil)
+			if !ok {
+				t.Fatalf("Lookup(ethereum, eth_getBlockByNumber, %s, %s) ok = false, want true", params, tt.id)
+			}
+			var resp struct {
+				ID     json.RawMessage `json:"id"`
+				Result json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("Unmarshal(%s) error = %v", body, err)
+			}
+			if string(resp.ID) != tt.wantID {
+				t.Errorf("Lookup served id %s, want %s", resp.ID, tt.wantID)
+			}
+			if string(resp.Result) != `"0xabc"` {
+				t.Errorf("Lookup served result %s, want %q", resp.Result, `"0xabc"`)
+			}
+		})
+	}
+}
+
+func TestRewriteResponseID(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		id       json.RawMessage
+		wantID   string
+	}{
+		{
+			name:     "success response",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`,
+			id:       json.RawMessage(`"b"`),
+			wantID:   `"b"`,
+		},
+		{
+			name:     "error response",
+			response: `{"jsonrpc":"2.0","id":"a","error":{"code":3,"message":"execution reverted"}}`,
+			id:       json.RawMessage(`7`),
+			wantID:   `7`,
+		},
+		{
+			name:     "missing id in cached response",
+			response: `{"jsonrpc":"2.0","result":"0xabc"}`,
+			id:       json.RawMessage(`5`),
+			wantID:   `5`,
+		},
+		{
+			name:     "nil id becomes null",
+			response: `{"jsonrpc":"2.0","id":9,"result":"0xabc"}`,
+			id:       nil,
+			wantID:   `null`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := RewriteResponseID([]byte(tt.response), tt.id)
+			var got struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      json.RawMessage `json:"id"`
+				Result  json.RawMessage `json:"result"`
+				Error   json.RawMessage `json:"error"`
+			}
+			var want struct {
+				Result json.RawMessage `json:"result"`
+				Error  json.RawMessage `json:"error"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("Unmarshal(RewriteResponseID(%s, %s)) error = %v", tt.response, tt.id, err)
+			}
+			if err := json.Unmarshal([]byte(tt.response), &want); err != nil {
+				t.Fatalf("Unmarshal(%s) error = %v", tt.response, err)
+			}
+			if string(got.ID) != tt.wantID {
+				t.Errorf("RewriteResponseID(%s, %s) id = %s, want %s", tt.response, tt.id, got.ID, tt.wantID)
+			}
+			if got.JSONRPC != "2.0" {
+				t.Errorf("RewriteResponseID(%s, %s) jsonrpc = %q, want %q", tt.response, tt.id, got.JSONRPC, "2.0")
+			}
+			if string(got.Result) != string(want.Result) {
+				t.Errorf("RewriteResponseID(%s, %s) result = %s, want %s", tt.response, tt.id, got.Result, want.Result)
+			}
+			if string(got.Error) != string(want.Error) {
+				t.Errorf("RewriteResponseID(%s, %s) error field = %s, want %s", tt.response, tt.id, got.Error, want.Error)
+			}
+		})
+	}
+
+	t.Run("non-object response passes through", func(t *testing.T) {
+		in := []byte(`"not an object"`)
+		if out := RewriteResponseID(in, json.RawMessage(`1`)); !bytes.Equal(out, in) {
+			t.Errorf("RewriteResponseID(%s, 1) = %s, want passthrough %s", in, out, in)
+		}
+	})
+}
