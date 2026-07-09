@@ -371,16 +371,16 @@ func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMappi
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Error: map[string]any{
+					Error: rawJSON(map[string]any{
 						"code":    -32603,
 						"message": "multicall response missing",
-					},
+					}),
 				})
 			}
 			continue
 		}
 
-		if resp.Error != nil {
+		if resp.HasError() {
 			for _, entry := range group.Entries {
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
@@ -391,16 +391,16 @@ func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMappi
 			continue
 		}
 
-		resultHex, ok := resp.Result.(string)
-		if !ok {
+		var resultHex string
+		if err := json.Unmarshal(resp.Result, &resultHex); err != nil {
 			for _, entry := range group.Entries {
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Error: map[string]any{
+					Error: rawJSON(map[string]any{
 						"code":    -32603,
 						"message": "multicall result not a hex string",
-					},
+					}),
 				})
 			}
 			continue
@@ -412,10 +412,10 @@ func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMappi
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Error: map[string]any{
+					Error: rawJSON(map[string]any{
 						"code":    -32603,
 						"message": "multicall decode error: " + err.Error(),
-					},
+					}),
 				})
 			}
 			continue
@@ -426,10 +426,10 @@ func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMappi
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Error: map[string]any{
+					Error: rawJSON(map[string]any{
 						"code":    -32603,
 						"message": fmt.Sprintf("multicall result count mismatch: got %d, expected %d", len(results), len(group.Entries)),
-					},
+					}),
 				})
 			}
 			continue
@@ -441,17 +441,17 @@ func expandMulticallResponses(responses []BatchResponse, mapping *MulticallMappi
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Result:  "0x" + hex.EncodeToString(r.ReturnData),
+					Result:  rawJSON("0x" + hex.EncodeToString(r.ReturnData)),
 				})
 			} else {
 				expanded = append(expanded, BatchResponse{
 					JSONRPC: "2.0",
 					ID:      entry.OriginalID,
-					Error: map[string]any{
+					Error: rawJSON(map[string]any{
 						"code":    3,
 						"message": "execution reverted",
 						"data":    "0x" + hex.EncodeToString(r.ReturnData),
-					},
+					}),
 				})
 			}
 		}

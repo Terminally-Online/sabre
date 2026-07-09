@@ -567,7 +567,7 @@ func subCallKey(chain string, target [20]byte, callData []byte) string {
 	h.Write(target[:])
 	h.Write([]byte{0})
 	h.Write(callData)
-	return fmt.Sprintf("sub:v1:%x", h.Sum(nil))
+	return fmt.Sprintf("sub:v2:%x", h.Sum(nil))
 }
 
 // subCallNegKey namespaces the negative cache for an immutable read that reverts.
@@ -578,7 +578,7 @@ func subCallNegKey(chain string, target [20]byte, callData []byte) string {
 	h.Write(target[:])
 	h.Write([]byte{0})
 	h.Write(callData)
-	return fmt.Sprintf("sub:neg:v1:%x", h.Sum(nil))
+	return fmt.Sprintf("sub:neg:v2:%x", h.Sum(nil))
 }
 
 // putNegative records that an immutable selector reverted for a target. Block-
@@ -627,7 +627,10 @@ func (s *Store) PutImmortal(key string, body []byte, chainID string) {
 	}
 }
 
-// CanonicalKey generates a canonical cache key for a JSON-RPC request.
+// CanonicalKey generates a canonical cache key for a JSON-RPC request. The
+// version prefix (shared convention with subCallKey/subCallNegKey) is bumped
+// whenever persisted entries may be corrupt or their semantics change, so a
+// deploy invalidates the whole persisted cache and stale entries age out.
 func CanonicalKey(chainID, method string, params json.RawMessage) (string, error) {
 	h := sha256.New()
 	h.Write([]byte(chainID))
@@ -642,7 +645,7 @@ func CanonicalKey(chainID, method string, params json.RawMessage) (string, error
 		min, _ := json.Marshal(anyParams)
 		h.Write(min)
 	}
-	return fmt.Sprintf("v1:%x", h.Sum(nil)), nil
+	return fmt.Sprintf("v2:%x", h.Sum(nil)), nil
 }
 
 // TTL determines the appropriate time-to-live for caching a specific RPC method.
