@@ -322,7 +322,31 @@ func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg
 		return nil, false
 	}
 	key, _ := CanonicalKey(chain, method, params)
-	return s.Get(key)
+	if body, ok := s.Get(key); ok {
+		return RewriteResponseID(body, id), true
+	}
+	return nil, false
+}
+
+// RewriteResponseID returns the JSON-RPC response with its id field replaced by
+// the given id. Cached responses carry the original requester's id, so every
+// cache serve must stamp the current request's id or an id-matched client will
+// mismatch or misroute values across calls. If the response is not a JSON
+// object it is returned unchanged.
+func RewriteResponseID(response []byte, id json.RawMessage) []byte {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(response, &fields); err != nil {
+		return response
+	}
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	fields["id"] = id
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return response
+	}
+	return out
 }
 
 // Store caches an upstream response: the immutable sub-calls of a multicall, or

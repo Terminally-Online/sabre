@@ -2,6 +2,8 @@ module sabre
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/cockroachdb/pebble v1.1.5

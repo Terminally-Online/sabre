@@ -184,7 +184,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 				ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
 				if ttl > 0 {
 					if cached, ok := cstore.Get(key); ok {
-						cachedResponses[i] = cached
+						cachedResponses[i] = backend.RewriteResponseID(cached, reqItem.ID)
 						continue
 					}
 				}
