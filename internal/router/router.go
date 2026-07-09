@@ -282,6 +282,11 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 					if isBatch {
 						var batchResponses []json.RawMessage
 						if err := json.Unmarshal(data, &batchResponses); err == nil {
+							// JSON-RPC batch responses may arrive in any order;
+							// everything below (merge positions, cache keys) is
+							// positional, so misordered responses would be stamped
+							// onto the wrong requests and poison the cache.
+							batchResponses = orderBatchResponses(batchResponses, reqs)
 							if len(cachedResponses) > 0 && len(uncachedIndices) > 0 {
 								mergedResponses := make([]json.RawMessage, len(originalReqs))
 								for i, cached := range cachedResponses {
@@ -300,6 +305,13 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 							}
 
 							for i, respBytes := range batchResponses {
+								// Cache-served entries were merged back in above;
+								// re-storing them would refresh their TTL without an
+								// upstream fetch and keep hot keys stale forever.
+								if i < len(cachedResponses) && cachedResponses[i] != nil {
+									continue
+								}
+
 								blockNum, blockHash := backend.ExtractBlockInfo(respBytes)
 								if blockNum > 0 {
 									cstore.UpdateLatestBlock(chain, blockNum, blockHash, respBytes)
@@ -432,6 +444,47 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 	return srv
 }
 
+// orderBatchResponses reorders upstream batch responses to match the request
+// order by JSON-RPC id. Falls back to the original ordering whenever ids are
+// duplicated, unmatched, or unparseable — positional is the only defensible
+// interpretation at that point.
+func orderBatchResponses(responses []json.RawMessage, reqs []rpcReq) []json.RawMessage {
+	if len(responses) != len(reqs) {
+		return responses
+	}
+	pos := make(map[string]int, len(reqs))
+	for i, r := range reqs {
+		id := normalizeID(r.ID)
+		if _, dup := pos[id]; dup {
+			return responses
+		}
+		pos[id] = i
+	}
+	ordered := make([]json.RawMessage, len(reqs))
+	for _, resp := range responses {
+		var env struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if json.Unmarshal(resp, &env) != nil {
+			return responses
+		}
+		i, ok := pos[normalizeID(env.ID)]
+		if !ok || ordered[i] != nil {
+			return responses
+		}
+		ordered[i] = resp
+	}
+	return ordered
+}
+
+func normalizeID(id json.RawMessage) string {
+	s := string(bytes.TrimSpace(id))
+	if s == "" {
+		return "null"
+	}
+	return s
+}
+
 func writeHopSafeHeaders(dst http.ResponseWriter, src http.Header) {
 	for k, vv := range src {
 		kl := strings.ToLower(k)
@@ -520,7 +573,7 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 
 		allFailed := len(responses) > 0
 		for _, resp := range responses {
-			if resp.Error == nil {
+			if !resp.HasError() {
 				allFailed = false
 				break
 			}
@@ -550,8 +603,8 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 
 		select {
 		case resp := <-responseChan:
-			if resp.Error != nil {
-				return 0, nil, nil, fmt.Errorf("batch response error: %v", resp.Error)
+			if resp.HasError() {
+				return 0, nil, nil, fmt.Errorf("batch response error: %s", string(resp.Error))
 			}
 			data, err = json.Marshal(resp)
 			if err != nil {

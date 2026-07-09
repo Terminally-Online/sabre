@@ -434,9 +434,9 @@ func TestMulticallFullPipelineWithMock(t *testing.T) {
 
 	// Mock responses from backend: one for eth_blockNumber passthrough, one for multicall
 	mockResponses := []BatchResponse{
-		{JSONRPC: "2.0", ID: json.RawMessage(`"2"`), Result: "0x134eb78"},
+		{JSONRPC: "2.0", ID: json.RawMessage(`"2"`), Result: rawJSON("0x134eb78")},
 		{JSONRPC: "2.0", ID: mapping.Groups[0].SyntheticID,
-			Result: "0x" + hex.EncodeToString(multicallResultData)},
+			Result: rawJSON("0x" + hex.EncodeToString(multicallResultData))},
 	}
 
 	// Step 3: Expand
@@ -458,43 +458,43 @@ func TestMulticallFullPipelineWithMock(t *testing.T) {
 
 	// Verify passthrough (eth_blockNumber)
 	r2 := respByID[`"2"`]
-	if r2.Result != "0x134eb78" {
-		t.Errorf("eth_blockNumber response: got %v, want 0x134eb78", r2.Result)
+	if string(r2.Result) != `"0x134eb78"` {
+		t.Errorf("eth_blockNumber response: got %s, want 0x134eb78", r2.Result)
 	}
-	if r2.Error != nil {
+	if r2.HasError() {
 		t.Errorf("eth_blockNumber should not have error")
 	}
 
 	// Verify expanded call 1 (success)
 	r1 := respByID[`"1"`]
-	if r1.Error != nil {
-		t.Errorf("call 1 should not have error, got %v", r1.Error)
+	if r1.HasError() {
+		t.Errorf("call 1 should not have error, got %s", r1.Error)
 	}
 	expectedResult1 := "0x" + strings.Repeat("aa", 32)
-	if r1.Result != expectedResult1 {
-		t.Errorf("call 1 result: got %v, want %s", r1.Result, expectedResult1)
+	if string(r1.Result) != `"`+expectedResult1+`"` {
+		t.Errorf("call 1 result: got %s, want %s", r1.Result, expectedResult1)
 	}
 
 	// Verify expanded call 3 (success)
 	r3 := respByID[`"3"`]
-	if r3.Error != nil {
-		t.Errorf("call 3 should not have error, got %v", r3.Error)
+	if r3.HasError() {
+		t.Errorf("call 3 should not have error, got %s", r3.Error)
 	}
 	expectedResult3 := "0x" + strings.Repeat("bb", 32)
-	if r3.Result != expectedResult3 {
-		t.Errorf("call 3 result: got %v, want %s", r3.Result, expectedResult3)
+	if string(r3.Result) != `"`+expectedResult3+`"` {
+		t.Errorf("call 3 result: got %s, want %s", r3.Result, expectedResult3)
 	}
 
 	// Verify expanded call 4 (reverted)
 	r4 := respByID[`"4"`]
-	if r4.Error == nil {
+	if !r4.HasError() {
 		t.Fatal("call 4 should have error (reverted)")
 	}
-	errMap, ok := r4.Error.(map[string]any)
-	if !ok {
-		t.Fatal("error should be a map")
+	var errMap map[string]any
+	if err := json.Unmarshal(r4.Error, &errMap); err != nil {
+		t.Fatal("error should be a JSON object")
 	}
-	if errMap["code"] != 3 {
+	if errMap["code"] != float64(3) {
 		t.Errorf("reverted call error code: got %v, want 3", errMap["code"])
 	}
 	if errMap["message"] != "execution reverted" {
@@ -528,9 +528,9 @@ func TestMulticallPipelineWithMulticallError(t *testing.T) {
 
 	// Simulate: eth_blockNumber succeeds, multicall fails
 	mockResponses := []BatchResponse{
-		{JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Result: "0x100"},
+		{JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Result: rawJSON("0x100")},
 		{JSONRPC: "2.0", ID: mapping.Groups[0].SyntheticID,
-			Error: map[string]any{"code": -32000, "message": "out of gas"}},
+			Error: rawJSON(map[string]any{"code": -32000, "message": "out of gas"})},
 	}
 	_ = optimized
 
@@ -549,14 +549,14 @@ func TestMulticallPipelineWithMulticallError(t *testing.T) {
 	}
 
 	// Passthrough should succeed
-	if respByID[`"1"`].Error != nil {
+	if respByID[`"1"`].HasError() {
 		t.Error("passthrough should not have error")
 	}
 
 	// Aggregated calls should have the multicall error
 	for _, id := range []string{`"2"`, `"3"`} {
 		r := respByID[id]
-		if r.Error == nil {
+		if !r.HasError() {
 			t.Errorf("call %s should have error", id)
 		}
 	}
@@ -619,13 +619,13 @@ func TestMulticallLiveNode(t *testing.T) {
 	)
 
 	mcResp := doRPCCall(t, client, endpoint, multicallReq)
-	if mcResp.Error != nil {
-		t.Fatalf("multicall eth_call failed: %v", mcResp.Error)
+	if mcResp.HasError() {
+		t.Fatalf("multicall eth_call failed: %s", mcResp.Error)
 	}
 
-	resultHex, ok := mcResp.Result.(string)
-	if !ok {
-		t.Fatalf("multicall result is not a string: %T %v", mcResp.Result, mcResp.Result)
+	var resultHex string
+	if err := json.Unmarshal(mcResp.Result, &resultHex); err != nil {
+		t.Fatalf("multicall result is not a string: %s", mcResp.Result)
 	}
 
 	results, err := decodeAggregate3Result(resultHex)
@@ -676,37 +676,39 @@ func TestMulticallLiveNode(t *testing.T) {
 		`{"jsonrpc":"2.0","id":"d1","method":"eth_call","params":[{"to":"%s","data":"0x42cbb15c"},"latest"]}`,
 		multicallAddr,
 	))
-	if directBlockNumResp.Error != nil {
-		t.Fatalf("direct getBlockNumber failed: %v", directBlockNumResp.Error)
+	if directBlockNumResp.HasError() {
+		t.Fatalf("direct getBlockNumber failed: %s", directBlockNumResp.Error)
 	}
 
 	directTimestampResp := doRPCCall(t, client, endpoint, fmt.Sprintf(
 		`{"jsonrpc":"2.0","id":"d2","method":"eth_call","params":[{"to":"%s","data":"0x0f28c97d"},"latest"]}`,
 		multicallAddr,
 	))
-	if directTimestampResp.Error != nil {
-		t.Fatalf("direct getCurrentBlockTimestamp failed: %v", directTimestampResp.Error)
+	if directTimestampResp.HasError() {
+		t.Fatalf("direct getCurrentBlockTimestamp failed: %s", directTimestampResp.Error)
 	}
 
 	// Block number and timestamp from multicall vs direct may differ by a few
 	// blocks since they're separate calls to "latest". Verify they're in the
 	// same ballpark (within 100 blocks / 2000 seconds).
-	directBlockNumHex := strings.TrimPrefix(directTimestampResp.Result.(string), "0x")
-	_ = directBlockNumHex // both are valid, just verify no errors
+	var directTimestampHex string
+	_ = json.Unmarshal(directTimestampResp.Result, &directTimestampHex)
 
-	t.Logf("direct getBlockNumber result: %v", directBlockNumResp.Result)
-	t.Logf("direct getCurrentBlockTimestamp result: %v", directTimestampResp.Result)
+	t.Logf("direct getBlockNumber result: %s", directBlockNumResp.Result)
+	t.Logf("direct getCurrentBlockTimestamp result: %s", directTimestampResp.Result)
 
 	// getBlockHash(1) should be deterministic — same block 1 hash
 	directBlockHashResp := doRPCCall(t, client, endpoint, fmt.Sprintf(
 		`{"jsonrpc":"2.0","id":"d3","method":"eth_call","params":[{"to":"%s","data":"0xee82ac5e0000000000000000000000000000000000000000000000000000000000000001"},"latest"]}`,
 		multicallAddr,
 	))
-	if directBlockHashResp.Error != nil {
-		t.Fatalf("direct getBlockHash failed: %v", directBlockHashResp.Error)
+	if directBlockHashResp.HasError() {
+		t.Fatalf("direct getBlockHash failed: %s", directBlockHashResp.Error)
 	}
 
-	directBlockHash := strings.TrimPrefix(directBlockHashResp.Result.(string), "0x")
+	var directBlockHashHex string
+	_ = json.Unmarshal(directBlockHashResp.Result, &directBlockHashHex)
+	directBlockHash := strings.TrimPrefix(directBlockHashHex, "0x")
 	multicallBlockHash := hex.EncodeToString(blockHashBytes)
 
 	if directBlockHash != multicallBlockHash {
@@ -819,19 +821,21 @@ func TestMulticallLiveNodeFullPipeline(t *testing.T) {
 			t.Errorf("missing response for ID %s", id)
 			continue
 		}
-		if r.Error != nil {
-			t.Errorf("response %s has error: %v", id, r.Error)
+		if r.HasError() {
+			t.Errorf("response %s has error: %s", id, r.Error)
 			continue
 		}
-		t.Logf("response %s: %v", id, r.Result)
+		t.Logf("response %s: %s", id, r.Result)
 	}
 
 	// Verify getBlockNumber result from multicall is reasonable
 	r1 := respByID[`"1"`]
-	if r1.Result == nil {
+	if len(r1.Result) == 0 {
 		t.Fatal("getBlockNumber result is nil")
 	}
-	blockNumHex := strings.TrimPrefix(r1.Result.(string), "0x")
+	var r1Hex string
+	_ = json.Unmarshal(r1.Result, &r1Hex)
+	blockNumHex := strings.TrimPrefix(r1Hex, "0x")
 	blockNumBytes, _ := hex.DecodeString(blockNumHex)
 	if len(blockNumBytes) == 32 {
 		blockNum := readUint256(blockNumBytes)
@@ -843,10 +847,10 @@ func TestMulticallLiveNodeFullPipeline(t *testing.T) {
 
 	// Verify eth_blockNumber passthrough result
 	r3 := respByID[`"3"`]
-	if r3.Result == nil {
+	if len(r3.Result) == 0 {
 		t.Fatal("eth_blockNumber result is nil")
 	}
-	t.Logf("passthrough eth_blockNumber = %v", r3.Result)
+	t.Logf("passthrough eth_blockNumber = %s", r3.Result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,8 +1143,8 @@ func TestExpandMulticallResponses(t *testing.T) {
 			}},
 		}
 		responses := []BatchResponse{
-			{JSONRPC: "2.0", ID: json.RawMessage(`"pt1"`), Result: "0xdead"},
-			{JSONRPC: "2.0", ID: json.RawMessage(`"__multicall_99"`), Result: "0x" + hex.EncodeToString(resultData)},
+			{JSONRPC: "2.0", ID: json.RawMessage(`"pt1"`), Result: rawJSON("0xdead")},
+			{JSONRPC: "2.0", ID: json.RawMessage(`"__multicall_99"`), Result: rawJSON("0x" + hex.EncodeToString(resultData))},
 		}
 		expanded, err := expandMulticallResponses(responses, mapping)
 		if err != nil {
@@ -1153,14 +1157,14 @@ func TestExpandMulticallResponses(t *testing.T) {
 		for _, r := range expanded {
 			respByID[string(r.ID)] = r
 		}
-		if respByID[`"pt1"`].Result != "0xdead" {
+		if string(respByID[`"pt1"`].Result) != `"0xdead"` {
 			t.Errorf("passthrough result mismatch")
 		}
-		if respByID[`"1"`].Result != "0xaaaa" {
-			t.Errorf("expected 0xaaaa, got %v", respByID[`"1"`].Result)
+		if string(respByID[`"1"`].Result) != `"0xaaaa"` {
+			t.Errorf("expected 0xaaaa, got %s", respByID[`"1"`].Result)
 		}
-		if respByID[`"2"`].Result != "0xbbbb" {
-			t.Errorf("expected 0xbbbb, got %v", respByID[`"2"`].Result)
+		if string(respByID[`"2"`].Result) != `"0xbbbb"` {
+			t.Errorf("expected 0xbbbb, got %s", respByID[`"2"`].Result)
 		}
 	})
 
@@ -1179,7 +1183,7 @@ func TestExpandMulticallResponses(t *testing.T) {
 			}},
 		}
 		responses := []BatchResponse{
-			{JSONRPC: "2.0", ID: json.RawMessage(`"__multicall_100"`), Result: "0x" + hex.EncodeToString(resultData)},
+			{JSONRPC: "2.0", ID: json.RawMessage(`"__multicall_100"`), Result: rawJSON("0x" + hex.EncodeToString(resultData))},
 		}
 		expanded, err := expandMulticallResponses(responses, mapping)
 		if err != nil {
@@ -1188,14 +1192,17 @@ func TestExpandMulticallResponses(t *testing.T) {
 		if len(expanded) != 2 {
 			t.Fatalf("expected 2, got %d", len(expanded))
 		}
-		if expanded[0].Error != nil {
+		if expanded[0].HasError() {
 			t.Error("result[0] should not have error")
 		}
-		if expanded[1].Error == nil {
+		if !expanded[1].HasError() {
 			t.Fatal("result[1] should have error")
 		}
-		errMap := expanded[1].Error.(map[string]any)
-		if errMap["code"] != 3 {
+		var errMap map[string]any
+		if err := json.Unmarshal(expanded[1].Error, &errMap); err != nil {
+			t.Fatalf("error should be a JSON object: %v", err)
+		}
+		if errMap["code"] != float64(3) {
 			t.Errorf("expected error code 3, got %v", errMap["code"])
 		}
 	})
@@ -1212,11 +1219,11 @@ func TestExpandMulticallResponses(t *testing.T) {
 		}
 		responses := []BatchResponse{
 			{JSONRPC: "2.0", ID: json.RawMessage(`"__multicall_101"`),
-				Error: map[string]any{"code": -32000, "message": "execution reverted"}},
+				Error: rawJSON(map[string]any{"code": -32000, "message": "execution reverted"})},
 		}
 		expanded, _ := expandMulticallResponses(responses, mapping)
 		for i, r := range expanded {
-			if r.Error == nil {
+			if !r.HasError() {
 				t.Errorf("result[%d] should have error", i)
 			}
 		}
@@ -1230,7 +1237,7 @@ func TestExpandMulticallResponses(t *testing.T) {
 			}},
 		}
 		expanded, _ := expandMulticallResponses([]BatchResponse{}, mapping)
-		if len(expanded) != 1 || expanded[0].Error == nil {
+		if len(expanded) != 1 || !expanded[0].HasError() {
 			t.Error("should have error for missing response")
 		}
 	})

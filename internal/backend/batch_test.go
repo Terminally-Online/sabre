@@ -1,8 +1,13 @@
 package backend
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,12 +76,12 @@ func TestBatchProcessor_AddRequest(t *testing.T) {
 		t.Error("expected batch to exist for backend URL")
 	}
 
-	if len(batch.Requests) != 1 {
-		t.Errorf("expected 1 request in batch, got %d", len(batch.Requests))
+	if len(batch.entries) != 1 {
+		t.Errorf("expected 1 request in batch, got %d", len(batch.entries))
 	}
 
-	if batch.Requests[0].Method != "eth_blockNumber" {
-		t.Errorf("expected method eth_blockNumber, got %s", batch.Requests[0].Method)
+	if batch.entries[0].req.Method != "eth_blockNumber" {
+		t.Errorf("expected method eth_blockNumber, got %s", batch.entries[0].req.Method)
 	}
 }
 
@@ -322,22 +327,22 @@ func TestBatchProcessor_RequestMatching(t *testing.T) {
 		t.Fatal("expected batch to exist for backend")
 	}
 
-	if len(batch.Requests) != 2 {
-		t.Errorf("expected 2 requests in batch, got %d", len(batch.Requests))
+	if len(batch.entries) != 2 {
+		t.Errorf("expected 2 requests in batch, got %d", len(batch.entries))
 	}
 
-	if string(batch.Requests[0].ID) != `"1"` {
-		t.Errorf("expected first request ID \"1\", got %s", string(batch.Requests[0].ID))
+	if string(batch.entries[0].req.ID) != `"1"` {
+		t.Errorf("expected first request ID \"1\", got %s", string(batch.entries[0].req.ID))
 	}
-	if string(batch.Requests[1].ID) != `"2"` {
-		t.Errorf("expected second request ID \"2\", got %s", string(batch.Requests[1].ID))
+	if string(batch.entries[1].req.ID) != `"2"` {
+		t.Errorf("expected second request ID \"2\", got %s", string(batch.entries[1].req.ID))
 	}
 
-	if batch.Requests[0].Method != "eth_blockNumber" {
-		t.Errorf("expected first request method eth_blockNumber, got %s", batch.Requests[0].Method)
+	if batch.entries[0].req.Method != "eth_blockNumber" {
+		t.Errorf("expected first request method eth_blockNumber, got %s", batch.entries[0].req.Method)
 	}
-	if batch.Requests[1].Method != "eth_getBalance" {
-		t.Errorf("expected second request method eth_getBalance, got %s", batch.Requests[1].Method)
+	if batch.entries[1].req.Method != "eth_getBalance" {
+		t.Errorf("expected second request method eth_getBalance, got %s", batch.entries[1].req.Method)
 	}
 
 	if responseChan1 == responseChan2 {
@@ -388,5 +393,240 @@ func TestBatchProcessor_WorkerReuse(t *testing.T) {
 
 	if len(bp.workers) != 0 {
 		t.Errorf("expected empty worker pool at end, got %d", len(bp.workers))
+	}
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func jsonHTTPResponse(req *http.Request, body []byte) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func decodeUpstreamBatch(r *http.Request) ([]BatchRequest, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	var reqs []BatchRequest
+	if err := json.Unmarshal(body, &reqs); err != nil {
+		var single BatchRequest
+		if err := json.Unmarshal(body, &single); err != nil {
+			return nil, err
+		}
+		reqs = []BatchRequest{single}
+	}
+	return reqs, nil
+}
+
+// methodEchoClient answers every request with a result identifying the
+// request's method and params, in REVERSE order — a spec-legal upstream
+// behavior that breaks any positional or id-collision-prone response routing.
+func methodEchoClient(t *testing.T) *http.Client {
+	t.Helper()
+	return &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		reqs, err := decodeUpstreamBatch(r)
+		if err != nil {
+			return nil, err
+		}
+		resps := make([]BatchResponse, 0, len(reqs))
+		for i := len(reqs) - 1; i >= 0; i-- {
+			resps = append(resps, BatchResponse{
+				JSONRPC: "2.0",
+				ID:      reqs[i].ID,
+				Result:  rawJSON("m=" + reqs[i].Method + ";p=" + string(reqs[i].Params)),
+			})
+		}
+		out, _ := json.Marshal(resps)
+		return jsonHTTPResponse(r, out), nil
+	})}
+}
+
+// TestBatchProcessor_DuplicateClientIDsNoCrossTalk is the regression test for
+// cross-client response cross-talk: independent clients that share a JSON-RPC
+// id (every client counting from 1) are coalesced into one upstream batch, and
+// each must get back the payload for ITS request — never another client's.
+func TestBatchProcessor_DuplicateClientIDsNoCrossTalk(t *testing.T) {
+	bp := NewBatchProcessor(10, 20*time.Millisecond, 2, 0, MulticallConfig{})
+	client := methodEchoClient(t)
+
+	methods := []string{"eth_call", "eth_getLogs", "eth_getBlockByNumber", "eth_getStorageAt"}
+	chans := make([]<-chan BatchResponse, len(methods))
+	params := make([]string, len(methods))
+	for i, m := range methods {
+		params[i] = fmt.Sprintf(`["req-%d"]`, i)
+		ch, err := bp.AddRequest("https://upstream.example", BatchRequest{
+			JSONRPC: "2.0",
+			ID:      json.RawMessage(`1`),
+			Method:  m,
+			Params:  json.RawMessage(params[i]),
+		}, client)
+		if err != nil {
+			t.Fatalf("AddRequest %d: %v", i, err)
+		}
+		chans[i] = ch
+	}
+
+	for i, ch := range chans {
+		select {
+		case resp := <-ch:
+			if resp.HasError() {
+				t.Fatalf("request %d (%s): unexpected error %s", i, methods[i], resp.Error)
+			}
+			if string(resp.ID) != `1` {
+				t.Errorf("request %d: id rewritten to %s, want original 1", i, resp.ID)
+			}
+			var got string
+			if err := json.Unmarshal(resp.Result, &got); err != nil {
+				t.Fatalf("request %d: result not a string: %s", i, resp.Result)
+			}
+			want := fmt.Sprintf("m=%s;p=%s", methods[i], params[i])
+			if got != want {
+				t.Errorf("request %d (%s): CROSS-TALK — got payload %q, want %q", i, methods[i], got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d (%s): no response delivered", i, methods[i])
+		}
+	}
+}
+
+// TestBatchProcessor_MissingUpstreamResponse verifies that an upstream
+// dropping a response yields an explicit error for the affected caller
+// instead of stranding it until the router timeout, and does not disturb
+// the other callers' payloads.
+func TestBatchProcessor_MissingUpstreamResponse(t *testing.T) {
+	bp := NewBatchProcessor(10, 20*time.Millisecond, 2, 0, MulticallConfig{})
+	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		reqs, err := decodeUpstreamBatch(r)
+		if err != nil {
+			return nil, err
+		}
+		var resps []BatchResponse
+		for i, req := range reqs {
+			if i == 0 {
+				continue
+			}
+			resps = append(resps, BatchResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  rawJSON("m=" + req.Method),
+			})
+		}
+		out, _ := json.Marshal(resps)
+		return jsonHTTPResponse(r, out), nil
+	})}
+
+	ch1, err := bp.AddRequest("https://upstream.example", BatchRequest{
+		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_call", Params: json.RawMessage(`["a"]`),
+	}, client)
+	if err != nil {
+		t.Fatalf("AddRequest: %v", err)
+	}
+	ch2, err := bp.AddRequest("https://upstream.example", BatchRequest{
+		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_getLogs", Params: json.RawMessage(`["b"]`),
+	}, client)
+	if err != nil {
+		t.Fatalf("AddRequest: %v", err)
+	}
+
+	select {
+	case resp := <-ch1:
+		if !resp.HasError() {
+			t.Errorf("dropped request should receive an error, got result %s", resp.Result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dropped request: no response delivered")
+	}
+
+	select {
+	case resp := <-ch2:
+		if resp.HasError() {
+			t.Fatalf("surviving request: unexpected error %s", resp.Error)
+		}
+		if string(resp.Result) != `"m=eth_getLogs"` {
+			t.Errorf("surviving request: got payload %s, want \"m=eth_getLogs\"", resp.Result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("surviving request: no response delivered")
+	}
+}
+
+// TestBatchProcessor_MulticallDuplicateClientIDs exercises the multicall
+// fusion path with colliding client ids: fused eth_calls and a passthrough
+// all using id 1 must each receive their own payload after expansion.
+func TestBatchProcessor_MulticallDuplicateClientIDs(t *testing.T) {
+	mcCfg := MulticallConfig{Enabled: true, Address: multicallAddress, MaxCalls: 150}
+	bp := NewBatchProcessor(10, 20*time.Millisecond, 2, 0, mcCfg)
+
+	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		reqs, err := decodeUpstreamBatch(r)
+		if err != nil {
+			return nil, err
+		}
+		resps := make([]BatchResponse, 0, len(reqs))
+		for i := len(reqs) - 1; i >= 0; i-- {
+			req := reqs[i]
+			if req.Method == "eth_call" {
+				parsed, ok := parseEthCallParams(req.Params)
+				if ok && strings.EqualFold(parsed.Params.To, multicallAddress) {
+					calls, ok := decodeAggregate3Calls(hexToBytes(parsed.Params.Data))
+					if ok {
+						results := make([]multicallResult, len(calls))
+						for j, c := range calls {
+							results[j] = multicallResult{Success: true, ReturnData: c.CallData}
+						}
+						resps = append(resps, BatchResponse{
+							JSONRPC: "2.0",
+							ID:      req.ID,
+							Result:  rawJSON("0x" + hex.EncodeToString(encodeAggregate3Result(results))),
+						})
+						continue
+					}
+				}
+			}
+			resps = append(resps, BatchResponse{JSONRPC: "2.0", ID: req.ID, Result: rawJSON("0x1")})
+		}
+		out, _ := json.Marshal(resps)
+		return jsonHTTPResponse(r, out), nil
+	})}
+
+	reqs := []BatchRequest{
+		{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_call",
+			Params: json.RawMessage(`[{"to":"0x0000000000000000000000000000000000000001","data":"0xdeadbeef"},"latest"]`)},
+		{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_call",
+			Params: json.RawMessage(`[{"to":"0x0000000000000000000000000000000000000002","data":"0xcafebabe"},"latest"]`)},
+		{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_blockNumber", Params: json.RawMessage(`[]`)},
+	}
+	chans := make([]<-chan BatchResponse, len(reqs))
+	for i, req := range reqs {
+		ch, err := bp.AddRequest("https://upstream.example", req, client)
+		if err != nil {
+			t.Fatalf("AddRequest %d: %v", i, err)
+		}
+		chans[i] = ch
+	}
+
+	want := []string{`"0xdeadbeef"`, `"0xcafebabe"`, `"0x1"`}
+	for i, ch := range chans {
+		select {
+		case resp := <-ch:
+			if resp.HasError() {
+				t.Fatalf("request %d: unexpected error %s", i, resp.Error)
+			}
+			if string(resp.ID) != `1` {
+				t.Errorf("request %d: id %s, want original 1", i, resp.ID)
+			}
+			if string(resp.Result) != want[i] {
+				t.Errorf("request %d: CROSS-TALK — got payload %s, want %s", i, resp.Result, want[i])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d: no response delivered", i)
+		}
 	}
 }
