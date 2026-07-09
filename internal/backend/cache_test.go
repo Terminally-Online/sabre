@@ -607,7 +607,11 @@ func TestStore_LookupRewritesResponseID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%+v) error = %v", cfg, err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
 
 	params := json.RawMessage(`["0x1",false]`)
 	store.Store("ethereum", "eth_getBlockByNumber", params, []byte(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`), nil)
