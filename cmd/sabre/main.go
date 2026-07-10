@@ -56,14 +56,14 @@ func animate() func() {
 				}
 				n := min(max(int(ema/glyphRPS+0.5), 4), barMax)
 				bar := "<----]=╦" + strings.Repeat("═", n) + "▷"
-				fmt.Fprintf(os.Stdout, "\r%-80s %s rps %s total", bar, humanize.SI(rps, ""), humanize.SI(float64(cur), ""))
+				_, _ = fmt.Fprintf(os.Stdout, "\r%-80s %s rps %s total", bar, humanize.SI(rps, ""), humanize.SI(float64(cur), ""))
 			case <-done:
 				return
 			}
 		}
 	}()
 
-	return func() { close(done); fmt.Fprintln(os.Stdout) }
+	return func() { close(done); _, _ = fmt.Fprintln(os.Stdout) }
 }
 
 func main() {
@@ -99,7 +99,7 @@ func main() {
 	if err != nil {
 		zap.L().Fatal("cache open", zap.Error(err))
 	}
-	defer cstore.Close()
+	defer func() { _ = cstore.Close() }()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

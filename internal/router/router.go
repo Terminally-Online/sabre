@@ -46,7 +46,7 @@ type rpcReq struct {
 
 // NewRouter creates a new HTTP router for handling JSON-RPC requests.
 func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalancer) *http.Server {
-	defer fmt.Fprintln(os.Stdout)
+	defer func() { _, _ = fmt.Fprintln(os.Stdout) }()
 
 	mux := http.NewServeMux()
 
@@ -526,7 +526,7 @@ func sendTo(ctx context.Context, bk *backend.Backend, inHdr http.Header, body []
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ = io.ReadAll(resp.Body)
 
 	hdr = make(http.Header, len(resp.Header))

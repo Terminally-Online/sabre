@@ -175,7 +175,7 @@ func (s *Store) Get(key string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer closer.Close()
+	defer func() { _ = closer.Close() }()
 
 	var e entry
 	if json.Unmarshal(val, &e) == nil && e.Expiry >= now {

@@ -101,7 +101,7 @@ func (wm *Stream) Shutdown(ctx context.Context) {
 	for _, client := range wm.clients {
 		client.closed.Store(true)
 		if client.Conn != nil {
-			client.Conn.Close()
+			_ = client.Conn.Close()
 		}
 	}
 	wm.mu.Unlock()
@@ -111,7 +111,7 @@ func (wm *Stream) Shutdown(ctx context.Context) {
 		for _, conn := range connections {
 			conn.closed.Store(true)
 			if conn.Conn != nil {
-				conn.Conn.Close()
+				_ = conn.Conn.Close()
 			}
 		}
 	}
@@ -146,13 +146,13 @@ func (wm *Stream) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		wm.removeClient(clientID)
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	conn.SetReadLimit(wm.cfg.Subscriptions.MaxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
+	_ = conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
+		_ = conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
 		return nil
 	})
 
@@ -263,7 +263,7 @@ func (wm *Stream) handleUnsubscribe(client *WebsocketClient, msg *Message) {
 				Method:  "eth_unsubscribe",
 				Params:  msg.Params,
 			}
-			wsConn.sendMessage(&unsubMsg)
+			_ = wsConn.sendMessage(&unsubMsg)
 		}
 	}
 
@@ -348,10 +348,10 @@ func (wm *Stream) createWSConnection(backend *Backend) (*WebsocketConnection, er
 	wsConn.lastPong.Store(time.Now())
 
 	conn.SetReadLimit(wm.cfg.Subscriptions.MaxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
+	_ = conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
 	conn.SetPongHandler(func(string) error {
 		wsConn.lastPong.Store(time.Now())
-		conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
+		_ = conn.SetReadDeadline(time.Now().Add(wm.cfg.Subscriptions.ReadWait))
 		return nil
 	})
 
@@ -464,7 +464,7 @@ func (wm *Stream) forwardBackendMessage(wsConn *WebsocketConnection, msg *Messag
 func (wm *Stream) closeWSConnection(wsConn *WebsocketConnection) {
 	if wsConn.closed.CompareAndSwap(false, true) {
 		if wsConn.Conn != nil {
-			wsConn.Conn.Close()
+			_ = wsConn.Conn.Close()
 		}
 
 		wm.mu.Lock()
@@ -499,7 +499,7 @@ func (wm *Stream) removeClient(clientID string) {
 
 	client.closed.Store(true)
 	if client.Conn != nil {
-		client.Conn.Close()
+		_ = client.Conn.Close()
 	}
 
 	client.mu.Lock()
@@ -534,7 +534,7 @@ func (wsConn *WebsocketConnection) sendMessage(msg *Message) error {
 		return fmt.Errorf("websocket connection is nil")
 	}
 
-	wsConn.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = wsConn.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return wsConn.Conn.WriteJSON(msg)
 }
 
@@ -546,7 +546,7 @@ func (wm *Stream) sendToClient(client *WebsocketClient, msg *Message) {
 		return
 	}
 
-	client.Conn.SetWriteDeadline(time.Now().Add(wm.cfg.Subscriptions.WriteWait))
+	_ = client.Conn.SetWriteDeadline(time.Now().Add(wm.cfg.Subscriptions.WriteWait))
 	_ = client.Conn.WriteJSON(msg)
 }
 
@@ -717,7 +717,7 @@ func (wm *Stream) resetBackendConnections(staleBackend *Backend) {
 			Method:  sub.Method,
 			Params:  sub.Params,
 		}
-		newConn.sendMessage(&subMsg)
+		_ = newConn.sendMessage(&subMsg)
 	}
 	wm.mu.Unlock()
 
