@@ -587,12 +587,9 @@ ethereum = { url = "https://api.example.com/CHAIN_NAME", ws_url = "wss://api.exa
 }
 
 func TestParseConfig_EnvironmentVariableExpansion(t *testing.T) {
-	os.Setenv("API_URL", "https://api.example.com")
-	os.Setenv("WS_URL", "wss://api.example.com")
-	os.Setenv("API_KEY", "test-key")
-	defer os.Unsetenv("API_URL")
-	defer os.Unsetenv("WS_URL")
-	defer os.Unsetenv("API_KEY")
+	t.Setenv("API_URL", "https://api.example.com")
+	t.Setenv("WS_URL", "wss://api.example.com")
+	t.Setenv("API_KEY", "test-key")
 
 	configContent := `
 [sabre]

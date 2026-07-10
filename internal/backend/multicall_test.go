@@ -592,7 +592,7 @@ func TestMulticallLiveNode(t *testing.T) {
 	if err != nil {
 		t.Skipf("skipping live node test: cannot reach %s: %v", endpoint, err)
 	}
-	probeResp.Body.Close()
+	_ = probeResp.Body.Close()
 	if probeResp.StatusCode != 200 {
 		t.Skipf("skipping live node test: %s returned status %d", endpoint, probeResp.StatusCode)
 	}
@@ -735,7 +735,7 @@ func TestMulticallLiveNodeFullPipeline(t *testing.T) {
 	if err != nil {
 		t.Skipf("skipping: cannot reach %s: %v", endpoint, err)
 	}
-	probeResp.Body.Close()
+	_ = probeResp.Body.Close()
 	if probeResp.StatusCode != 200 {
 		t.Skipf("skipping: %s returned status %d", endpoint, probeResp.StatusCode)
 	}
@@ -785,7 +785,7 @@ func TestMulticallLiveNodeFullPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("batch request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1261,7 +1261,7 @@ func doRPCCall(t *testing.T, client *http.Client, endpoint, body string) BatchRe
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

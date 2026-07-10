@@ -129,7 +129,7 @@ func createTestStore(t *testing.T) *backend.Store {
 func cleanupTestStore(t *testing.T, store *backend.Store) {
 	t.Helper()
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 	}
 }
 

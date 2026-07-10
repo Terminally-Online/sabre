@@ -55,7 +55,7 @@ func TestNewStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if store == nil {
 		t.Fatal("expected store to be created")
@@ -78,7 +78,7 @@ func TestStore_GetPut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	key := "test-key"
 	data := []byte("test-data")
@@ -104,7 +104,7 @@ func TestStore_TTLExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	key := "test-key"
 	data := []byte("test-data")
@@ -139,7 +139,7 @@ func TestStore_DisabledCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	key := "test-key"
 	data := []byte("test-data")
@@ -164,7 +164,7 @@ func TestStore_BlockHashValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chainID := "ethereum"
 	blockNum := uint64(12345)
@@ -201,7 +201,7 @@ func TestStore_ReorgDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chainID := "ethereum"
 	blockNum := uint64(12345)
@@ -228,7 +228,7 @@ func TestStore_MultipleChains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	testCases := []struct {
 		chainID string
@@ -265,7 +265,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	done := make(chan bool, 10)
 	chainID := "ethereum"
@@ -303,7 +303,7 @@ func TestStore_BlockHashValidationEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chainID := "ethereum"
 
@@ -333,7 +333,7 @@ func TestStore_CleanupOldBlockHashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chainID := "ethereum"
 
@@ -362,7 +362,7 @@ func TestStore_ZeroTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	key := "test-key"
 	data := []byte("test-data")
@@ -388,7 +388,7 @@ func TestStore_NegativeTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error creating store, got %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	key := "test-key"
 	data := []byte("test-data")
@@ -521,7 +521,7 @@ func TestStore_StandaloneImmutableForeverCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chain := "1"
 	token := "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -568,7 +568,7 @@ func TestStore_StandaloneImmutableRevertNegativeCacheOnlyCode3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chain := "1"
 	mk := func(addr string) json.RawMessage {
