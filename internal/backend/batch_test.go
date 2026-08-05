@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -628,5 +629,60 @@ func TestBatchProcessor_MulticallDuplicateClientIDs(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("request %d: no response delivered", i)
 		}
+	}
+}
+
+// TestAccumulationDoesNotHoldAWorkerSlot pins that a batch still filling its
+// wait window does not occupy the concurrency semaphore.
+//
+// maxConcurrent exists to bound how many batches are in flight upstream. If it
+// also gates the accumulation wait, every backend's wait window queues behind
+// every other backend's and a caller's latency becomes the sum of the waits
+// ahead of it rather than its own. Under a busy indexer that sum runs past the
+// router's deadline and healthy requests come back as 502s.
+func TestAccumulationDoesNotHoldAWorkerSlot(t *testing.T) {
+	answer := func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqs []BatchRequest
+		_ = json.Unmarshal(body, &reqs)
+		out := make([]BatchResponse, len(reqs))
+		for i, q := range reqs {
+			out[i] = BatchResponse{JSONRPC: "2.0", ID: q.ID, Result: json.RawMessage(`"0x1"`)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+	var servers [2]*httptest.Server
+	for i := range servers {
+		servers[i] = httptest.NewServer(http.HandlerFunc(answer))
+		defer servers[i].Close()
+	}
+
+	const wait = 300 * time.Millisecond
+	bp := NewBatchProcessor(10, wait, 1, 1, MulticallConfig{})
+	req := BatchRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_blockNumber", Params: json.RawMessage(`[]`)}
+
+	chans := make([]<-chan BatchResponse, len(servers))
+	start := time.Now()
+	for i, s := range servers {
+		ch, err := bp.AddRequest(s.URL, req, s.Client())
+		if err != nil {
+			t.Fatalf("backend %d: AddRequest: %v", i, err)
+		}
+		chans[i] = ch
+	}
+	for i, ch := range chans {
+		select {
+		case resp := <-ch:
+			if resp.InternalErr != nil {
+				t.Fatalf("backend %d: %v", i, resp.InternalErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("backend %d never answered", i)
+		}
+	}
+
+	if elapsed, ceiling := time.Since(start), 2*wait; elapsed >= ceiling {
+		t.Fatalf("two backends settled in %v, at least %v — the accumulation waits are serializing on the worker semaphore", elapsed, ceiling)
 	}
 }

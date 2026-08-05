@@ -152,9 +152,6 @@ func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest, client
 }
 
 func (bp *BatchProcessor) processBatch(batch *Batch) {
-	bp.workers <- struct{}{}
-	defer func() { <-bp.workers }()
-
 	timer := time.NewTimer(bp.maxWaitTime)
 	defer timer.Stop()
 
@@ -197,7 +194,11 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 		requests, mapping = aggregateEthCalls(requests, bp.multicall)
 	}
 
-	responses, err := bp.sendBatch(batch, requests)
+	responses, err := func() ([]BatchResponse, error) {
+		bp.workers <- struct{}{}
+		defer func() { <-bp.workers }()
+		return bp.sendBatch(batch, requests)
+	}()
 
 	// Expand multicall responses back into individual responses.
 	if err == nil && mapping != nil {
