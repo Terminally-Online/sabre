@@ -1,0 +1,73 @@
+name: Tag
+
+# Publishing is driven by tags, so a merge that is not tagged ships nothing.
+# That gap is invisible — master looks correct while the deployed image stays
+# on whatever version was last tagged by hand, which is how a released fix can
+# sit unshipped for weeks. This derives the next version from the commits
+# themselves and pushes the tag, which is what Build and Release waits for.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive next version
+        id: next
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            echo "version=v0.1.0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          subjects=$(git log "$latest"..HEAD --pretty=%s)
+          if [ -z "$subjects" ]; then
+            echo "nothing to tag since $latest"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          major=$(echo "${latest#v}" | cut -d. -f1)
+          minor=$(echo "${latest#v}" | cut -d. -f2)
+          patch=$(echo "${latest#v}" | cut -d. -f3)
+
+          # A breaking change is the conventional-commit "!" marker or a
+          # BREAKING CHANGE footer; a feat bumps the minor; anything else that
+          # reached master is a patch, because it changed the binary.
+          if git log "$latest"..HEAD --pretty='%s%n%b' | grep -qE '^BREAKING CHANGE|^[a-z]+(\([^)]*\))?!:'; then
+            major=$((major + 1)); minor=0; patch=0
+          elif echo "$subjects" | grep -qE '^feat(\([^)]*\))?:'; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          echo "version=v${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+
+      - name: Push tag
+        if: steps.next.outputs.version != ''
+        run: |
+          set -euo pipefail
+          version="${{ steps.next.outputs.version }}"
+          if git rev-parse "$version" >/dev/null 2>&1; then
+            echo "$version already exists"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$version" -m "$version"
+          git push origin "$version"
