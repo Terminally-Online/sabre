@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
@@ -82,6 +83,19 @@ func main() {
 	logger := zap.Must(zap.NewProductionConfig().Build())
 	zap.ReplaceGlobals(logger)
 	defer func() { _ = logger.Sync() }()
+
+	// SABRE_PPROF serves net/http/pprof on its own address so a live instance
+	// can be profiled under real traffic. A proxy's whole value is the cost it
+	// adds per request, and that cost is not knowable from the outside.
+	// Unset means not served.
+	if addr := os.Getenv("SABRE_PPROF"); addr != "" {
+		go func() {
+			zap.L().Info("pprof", zap.String("addr", addr))
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				zap.L().Error("pprof server", zap.Error(err))
+			}
+		}()
+	}
 
 	if _, err := os.Stat(*envPath); err == nil {
 		if err := godotenv.Load(*envPath); err != nil {

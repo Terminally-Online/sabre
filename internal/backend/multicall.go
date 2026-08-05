@@ -39,12 +39,32 @@ func isImmutableSelector(callData []byte) bool {
 // read is immutable whether wrapped in aggregate3 or sent directly, and both
 // share subCallKey entries.
 func decodeImmutableCall(method string, params json.RawMessage) ([20]byte, []byte, bool) {
-	var zero [20]byte
-	if method != "eth_call" {
+	parsed, ok := parseEthCallParams(params)
+	if method != "eth_call" || !ok {
+		var zero [20]byte
 		return zero, nil, false
 	}
-	parsed, ok := parseEthCallParams(params)
-	if !ok || parsed.Params.To == "" || parsed.Params.Data == "" {
+	return decodeImmutableCallParsed(parsed)
+}
+
+// decodeImmutableCallFrom is decodeImmutableCallParsed guarded by whether the
+// caller's parse succeeded, so a caller that already tried to decode the params
+// does not decode them a second time to find out.
+func decodeImmutableCallFrom(parsedOK bool, parsed parsedEthCall) ([20]byte, []byte, bool) {
+	if !parsedOK {
+		var zero [20]byte
+		return zero, nil, false
+	}
+	return decodeImmutableCallParsed(parsed)
+}
+
+// decodeImmutableCallParsed is decodeImmutableCall over params a caller has
+// already decoded. Both cache probes ask about the same eth_call, so parsing it
+// once per request rather than once per probe removes a full JSON decode of the
+// call object from the hot path.
+func decodeImmutableCallParsed(parsed parsedEthCall) ([20]byte, []byte, bool) {
+	var zero [20]byte
+	if parsed.Params.To == "" || parsed.Params.Data == "" {
 		return zero, nil, false
 	}
 	if parsed.HasStateOverrides || parsed.Params.From != "" || parsed.Params.Value != "" || parsed.Params.Gas != "" || parsed.Params.GasPrice != "" {
@@ -60,11 +80,16 @@ func decodeImmutableCall(method string, params json.RawMessage) ([20]byte, []byt
 // decodeMulticall returns the inner Call3 tuples of an eth_call that wraps a
 // Multicall3 aggregate3 batch, or ok=false for any other request.
 func decodeMulticall(method string, params json.RawMessage) ([]call3, bool) {
-	if method != "eth_call" {
+	parsed, ok := parseEthCallParams(params)
+	if method != "eth_call" || !ok {
 		return nil, false
 	}
-	parsed, ok := parseEthCallParams(params)
-	if !ok || parsed.Params.Data == "" {
+	return decodeMulticallParsed(parsed)
+}
+
+// decodeMulticallParsed is decodeMulticall over already-decoded params.
+func decodeMulticallParsed(parsed parsedEthCall) ([]call3, bool) {
+	if parsed.Params.Data == "" {
 		return nil, false
 	}
 	return decodeAggregate3Calls(hexToBytes(parsed.Params.Data))

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/singleflight"
 )
@@ -26,6 +27,11 @@ type CacheConfig struct {
 	TTLBlock      time.Duration `toml:"ttl_block_ms"`
 	Clean         bool          `toml:"clean"`
 	MaxReorgDepth int           `toml:"max_reorg_depth"`
+
+	// BlockCacheBytes is how much memory the on-disk tier keeps for decompressed
+	// table blocks. Pebble's own default is small enough that a working set of
+	// any size reads from disk on nearly every lookup.
+	BlockCacheBytes int64 `toml:"block_cache_bytes"`
 }
 
 // Store provides persistent caching with TTL support and block hash validation.
@@ -231,7 +237,12 @@ func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string, 
 	if s.mem != nil {
 		s.mem.Add(key, e)
 	}
-	if s.db != nil {
+	// Tip-tracking entries live for a few hundred milliseconds, which is shorter
+	// than they would survive a restart and far shorter than the compactions
+	// their volume provokes. Writing them to disk grows the table count that
+	// every later lookup has to filter against, so the durable tier is reserved
+	// for entries whose lifetime can justify it and the rest stay in memory.
+	if s.db != nil && !e.shortLived(s.cfg) {
 		buf, _ := json.Marshal(e)
 		// NoSync: the cache is regenerable, so we never pay an fsync on the
 		// request path.
@@ -254,6 +265,15 @@ func (s *Store) Do(key string, fn func() ([]byte, error)) ([]byte, error) {
 		return nil, err
 	}
 	return v.([]byte), nil
+}
+
+// shortLived reports whether an entry expires too soon for the durable tier to
+// ever serve it.
+func (e entry) shortLived(cfg CacheConfig) bool {
+	if e.Expiry == math.MaxInt64 {
+		return false
+	}
+	return e.Expiry-time.Now().UnixMilli() <= cfg.TTLLatest.Milliseconds()
 }
 
 type entry struct {
@@ -279,16 +299,50 @@ func Open(cfg CacheConfig) (*Store, error) {
 	if cfg.MaxReorgDepth <= 0 {
 		cfg.MaxReorgDepth = 100
 	}
+	if cfg.BlockCacheBytes <= 0 {
+		cfg.BlockCacheBytes = 512 << 20
+	}
 
 	if !cfg.Enabled {
 		return &Store{cfg: cfg}, nil
 	}
-	db, err := pebble.Open(cfg.Path, &pebble.Options{})
+	db, err := pebble.Open(cfg.Path, pebbleOptions(cfg))
 	if err != nil {
 		return nil, err
 	}
 	mem, _ := lru.New[string, entry](cfg.MemEntries)
 	return &Store{db: db, mem: mem, cfg: cfg}, nil
+}
+
+// pebbleOptions configures the on-disk tier for a workload that is dominated by
+// lookups for keys which are not there.
+//
+// The proxy asks the cache about every request, and for a high-cardinality
+// method most of those keys have never been written. Without a filter policy a
+// miss cannot be answered from metadata: the reader loads each candidate
+// table's index block and data block off disk and decompresses them, only to
+// conclude the key is absent. That costs more than the node takes to answer,
+// which inverts the point of caching. A bloom filter answers the same question
+// from memory, and a block cache sized past the default keeps the tables that
+// are read from going back to disk at all.
+func pebbleOptions(cfg CacheConfig) *pebble.Options {
+	opts := &pebble.Options{
+		Cache:        pebble.NewCache(cfg.BlockCacheBytes),
+		MemTableSize: 64 << 20,
+	}
+	opts.Levels = make([]pebble.LevelOptions, 7)
+	for i := range opts.Levels {
+		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
+		opts.Levels[i].FilterType = pebble.TableFilter
+		opts.Levels[i].BlockSize = 32 << 10
+		if i > 0 {
+			opts.Levels[i].TargetFileSize = opts.Levels[i-1].TargetFileSize * 2
+		} else {
+			opts.Levels[i].TargetFileSize = 4 << 20
+		}
+	}
+	opts.EnsureDefaults()
+	return opts
 }
 
 type rpcResult struct {
@@ -305,10 +359,19 @@ func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg
 	if !s.cfg.Enabled {
 		return nil, false
 	}
-	if calls, ok := decodeMulticall(method, params); ok {
-		return s.serveMulticall(chain, id, calls)
+	// Both probes below ask about the same eth_call, so the call object is
+	// decoded once here rather than once per probe.
+	var parsed parsedEthCall
+	parsedOK := method == "eth_call"
+	if parsedOK {
+		parsed, parsedOK = parseEthCallParams(params)
 	}
-	if target, callData, ok := decodeImmutableCall(method, params); ok {
+	if parsedOK {
+		if calls, ok := decodeMulticallParsed(parsed); ok {
+			return s.serveMulticall(chain, id, calls)
+		}
+	}
+	if target, callData, ok := decodeImmutableCallFrom(parsedOK, parsed); ok {
 		if body, ok := s.Get(subCallKey(chain, target, callData)); ok {
 			out, _ := json.Marshal(rpcResult{JSONRPC: "2.0", ID: id, Result: fmt.Sprintf("0x%x", body)})
 			return out, true
