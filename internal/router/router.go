@@ -562,11 +562,13 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 		}
 
 		responses := make([]backend.BatchResponse, len(reqs))
+		deadline := time.NewTimer(timeout)
+		defer deadline.Stop()
 		for i, ch := range responseChans {
 			select {
 			case resp := <-ch:
 				responses[i] = resp
-			case <-time.After(timeout):
+			case <-deadline.C:
 				return 0, nil, nil, fmt.Errorf("batch request timeout")
 			}
 		}

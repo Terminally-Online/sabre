@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -628,5 +631,147 @@ func TestBatchProcessor_MulticallDuplicateClientIDs(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("request %d: no response delivered", i)
 		}
+	}
+}
+
+// TestAccumulationDoesNotHoldAWorkerSlot pins that a batch still filling its
+// wait window does not occupy the concurrency semaphore.
+//
+// maxConcurrent exists to bound how many batches are in flight upstream. If it
+// also gates the accumulation wait, every backend's wait window queues behind
+// every other backend's and a caller's latency becomes the sum of the waits
+// ahead of it rather than its own. Under a busy indexer that sum runs past the
+// router's deadline and healthy requests come back as 502s.
+func TestAccumulationDoesNotHoldAWorkerSlot(t *testing.T) {
+	answer := func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqs []BatchRequest
+		_ = json.Unmarshal(body, &reqs)
+		out := make([]BatchResponse, len(reqs))
+		for i, q := range reqs {
+			out[i] = BatchResponse{JSONRPC: "2.0", ID: q.ID, Result: json.RawMessage(`"0x1"`)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+	var servers [2]*httptest.Server
+	for i := range servers {
+		servers[i] = httptest.NewServer(http.HandlerFunc(answer))
+		defer servers[i].Close()
+	}
+
+	const wait = 300 * time.Millisecond
+	bp := NewBatchProcessor(10, wait, 1, 1, MulticallConfig{})
+	req := BatchRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_blockNumber", Params: json.RawMessage(`[]`)}
+
+	chans := make([]<-chan BatchResponse, len(servers))
+	start := time.Now()
+	for i, s := range servers {
+		ch, err := bp.AddRequest(s.URL, req, s.Client())
+		if err != nil {
+			t.Fatalf("backend %d: AddRequest: %v", i, err)
+		}
+		chans[i] = ch
+	}
+	for i, ch := range chans {
+		select {
+		case resp := <-ch:
+			if resp.InternalErr != nil {
+				t.Fatalf("backend %d: %v", i, resp.InternalErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("backend %d never answered", i)
+		}
+	}
+
+	if elapsed, ceiling := time.Since(start), 2*wait; elapsed >= ceiling {
+		t.Fatalf("two backends settled in %v, at least %v — the accumulation waits are serializing on the worker semaphore", elapsed, ceiling)
+	}
+}
+
+// benchUpstream answers a JSON-RPC batch after a fixed delay, modelling a node
+// whose per-call cost is dominated by execution rather than transport.
+func benchUpstream(latency time.Duration) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqs []BatchRequest
+		_ = json.Unmarshal(body, &reqs)
+		time.Sleep(latency)
+		out := make([]BatchResponse, len(reqs))
+		for i, q := range reqs {
+			out[i] = BatchResponse{JSONRPC: "2.0", ID: q.ID, Result: json.RawMessage(`"0x1"`)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+}
+
+// BenchmarkBatchThroughput sweeps the batch knobs against a fixed-latency
+// upstream and reports sustained requests per second plus per-request latency.
+//
+// The proxy exists to serve the most calls at the lowest latency, so the batch
+// settings are an empirical question, not a design preference: coalescing trades
+// added wait for fewer upstream round trips, and only measurement says where
+// that trade turns negative for a given upstream cost and caller concurrency.
+func BenchmarkBatchThroughput(b *testing.B) {
+	const callers = 128
+
+	req := BatchRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_call", Params: json.RawMessage(`[]`)}
+
+	for _, c := range []struct {
+		upstream time.Duration
+		workers  int
+		size     int
+		wait     time.Duration
+	}{
+		{2 * time.Millisecond, 4, 10, 50 * time.Millisecond},
+		{2 * time.Millisecond, 4, 10, 5 * time.Millisecond},
+		{2 * time.Millisecond, 64, 10, 5 * time.Millisecond},
+		{2 * time.Millisecond, 256, 1, 0},
+
+		{50 * time.Millisecond, 4, 10, 50 * time.Millisecond},
+		{50 * time.Millisecond, 16, 10, 5 * time.Millisecond},
+		{50 * time.Millisecond, 64, 10, 5 * time.Millisecond},
+		{50 * time.Millisecond, 256, 10, 5 * time.Millisecond},
+		{50 * time.Millisecond, 256, 1, 0},
+	} {
+		name := fmt.Sprintf("upstream=%s/workers=%d/size=%d/wait=%s", c.upstream, c.workers, c.size, c.wait)
+		b.Run(name, func(b *testing.B) {
+			srv := benchUpstream(c.upstream)
+			defer srv.Close()
+			bp := NewBatchProcessor(c.size, c.wait, c.workers, 1, MulticallConfig{})
+			var wg sync.WaitGroup
+			var latency atomic.Int64
+			work := make(chan struct{}, b.N)
+			for i := 0; i < b.N; i++ {
+				work <- struct{}{}
+			}
+			close(work)
+
+			b.ResetTimer()
+			start := time.Now()
+			for i := 0; i < callers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for range work {
+						t0 := time.Now()
+						ch, err := bp.AddRequest(srv.URL, req, srv.Client())
+						if err != nil {
+							b.Error(err)
+							return
+						}
+						<-ch
+						latency.Add(int64(time.Since(t0)))
+					}
+				}()
+			}
+			wg.Wait()
+			elapsed := time.Since(start)
+			b.StopTimer()
+
+			b.ReportMetric(float64(b.N)/elapsed.Seconds(), "req/s")
+			b.ReportMetric(float64(latency.Load())/float64(b.N)/1e6, "ms/req")
+		})
 	}
 }
