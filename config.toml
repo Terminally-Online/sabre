@@ -167,13 +167,17 @@ max_batch_size = 10
 # The maximum time to wait before processing a batch (in milliseconds). This
 # controls how long sabre waits for more requests to arrive before sending
 # the current batch. Lower values reduce latency but may result in smaller
-# batches and lower throughput. 50ms provides a good balance.
-max_batch_wait_ms = 50
+# batches and lower throughput. The wait only pays for itself when it is small
+# against the upstream's own latency; in front of a fast local node it is close
+# to pure added latency, so keep it well under what the node takes to answer.
+max_batch_wait_ms = 5
 # The maximum number of concurrent batch workers per backend. Each worker
 # processes batches independently, allowing multiple batches to be sent
-# simultaneously. Higher values increase concurrency but may overwhelm
-# slower backends. 4 workers provide good concurrency without overloading.
-max_batch_workers = 4
+# simultaneously. This bounds in-flight upstream calls, so it is the ceiling on
+# throughput: sustained requests per second cannot exceed this divided by the
+# upstream's latency. Set it too low and the queue builds until callers pass the
+# performance timeout and healthy requests come back as 502s.
+max_batch_workers = 32
 # Maximum retry attempts for transient failures within the batch processor.
 # This controls retries at the HTTP transport level (connection resets, 429s,
 # 5xx responses) before errors propagate to callers. The batch processor uses
@@ -271,6 +275,11 @@ clean = false
 # with data from recent blocks. Higher values provide better protection
 # but use more memory and may reduce cache effectiveness.
 max_reorg_depth = 100
+# How much memory the on-disk tier keeps for decompressed table blocks. Pebble's
+# own default is small enough that a working set of any size reads from disk on
+# nearly every lookup, and against a colocated node answering in a fraction of a
+# millisecond a lookup that reaches the disk costs more than the call it saves.
+block_cache_bytes = 536870912
 # The maximum number of entries in the cache. This is the maximum number of
 # entries that sabre will keep in memory. If the cache exceeds this limit,
 # sabre will evict the least recently used entries. You can change this to any
