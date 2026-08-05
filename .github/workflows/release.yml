@@ -7,10 +7,65 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: write
+  packages: write
+
 env:
   GO_VERSION: "1.25"
 
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      v: ${{ steps.pick.outputs.v }}
+      series: ${{ steps.pick.outputs.series }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A tag push carries its own version. A merge to master does not, and a
+      # merge that nobody versions publishes nothing while master looks correct
+      # — which is how the deployed image sat months behind its own repository.
+      # Deriving it here rather than in a separate workflow is deliberate: a tag
+      # pushed by GITHUB_TOKEN does not trigger another workflow, so a tagging
+      # job that hands off to this one would tag releases that never build.
+      - name: Pick the version
+        id: pick
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            if [ -z "$latest" ]; then
+              v="0.1.0"
+            else
+              subjects=$(git log "$latest"..HEAD --pretty=%s)
+              if [ -z "$subjects" ]; then
+                echo "nothing new since $latest"
+                exit 0
+              fi
+              major=$(echo "${latest#v}" | cut -d. -f1)
+              minor=$(echo "${latest#v}" | cut -d. -f2)
+              patch=$(echo "${latest#v}" | cut -d. -f3)
+              if git log "$latest"..HEAD --pretty='%s%n%b' | grep -qE '^BREAKING CHANGE|^[a-z]+(\([^)]*\))?!:'; then
+                major=$((major + 1)); minor=0; patch=0
+              elif echo "$subjects" | grep -qE '^feat(\([^)]*\))?:'; then
+                minor=$((minor + 1)); patch=0
+              else
+                patch=$((patch + 1))
+              fi
+              v="${major}.${minor}.${patch}"
+            fi
+          fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+          echo "series=$(echo "$v" | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
+          echo "version $v"
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -78,8 +133,8 @@ jobs:
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: [test, build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, test, build]
+    if: needs.version.outputs.v != ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -94,32 +149,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/terminally-online/sabre
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ghcr.io/terminally-online/sabre:${{ needs.version.outputs.v }}
+            ghcr.io/terminally-online/sabre:${{ needs.version.outputs.series }}
+            ghcr.io/terminally-online/sabre:latest
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ needs.version.outputs.v }}
 
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [test, build, docker]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, test, build, docker]
+    if: needs.version.outputs.v != ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -133,8 +180,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref_name }}
+          tag_name: v${{ needs.version.outputs.v }}
+          release_name: Release v${{ needs.version.outputs.v }}
           draft: false
           prerelease: false
 
