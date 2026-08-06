@@ -62,3 +62,4 @@ __debug_bin*
 # Go module cache
 go.sum.backup
 .data/
+dist/
