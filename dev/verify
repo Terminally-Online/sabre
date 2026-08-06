@@ -2,7 +2,7 @@
 set -uo pipefail
 
 GOLANGCI_LINT_VERSION="v2.11.3"
-JOBS=(lint test build)
+JOBS=(lint test build security)
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
@@ -50,6 +50,15 @@ job_build() {
 	for goos in linux windows darwin; do
 		GOOS="$goos" GOARCH=amd64 go build -o /dev/null ./cmd/sabre || return 1
 	done
+}
+
+job_security() {
+	GOBIN="$TOOLS" go install golang.org/x/vuln/cmd/govulncheck@latest || return 1
+	"$TOOLS/govulncheck" ./... || return 1
+	GOBIN="$TOOLS" go install honnef.co/go/tools/cmd/staticcheck@latest || return 1
+	"$TOOLS/staticcheck" ./... || return 1
+	docker run --rm -v "$ROOT:/pwd" trufflesecurity/trufflehog:latest \
+		filesystem --directory /pwd --only-verified --fail
 }
 
 run_job() {
