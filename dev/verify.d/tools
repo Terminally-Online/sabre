@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -uo pipefail
+source "$(dirname "$0")/common"
+
+installed() {
+	[[ -x "$TOOLS/$1" && -f "$TOOLS/.$1-$2" ]]
+}
+
+stamp() {
+	rm -f "$TOOLS/.$1-"*
+	touch "$TOOLS/.$1-$2"
+}
+
+if ! installed golangci-lint "$GOLANGCI_LINT_VERSION"; then
+	stage="$(mktemp -d "$CACHE/stage.XXXXXX")" || exit 1
+	GOBIN="$stage" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION" &&
+		mv -f "$stage/golangci-lint" "$TOOLS/golangci-lint" || {
+		rm -rf "$stage"
+		echo "FAIL: golangci-lint $GOLANGCI_LINT_VERSION install failed"
+		exit 1
+	}
+	rm -rf "$stage"
+	stamp golangci-lint "$GOLANGCI_LINT_VERSION"
+fi
+
+for tool in govulncheck staticcheck; do
+	[[ -x "$TOOLS/$tool" ]] && continue
+	case "$tool" in
+	govulncheck) pkg="golang.org/x/vuln/cmd/govulncheck@latest" ;;
+	staticcheck) pkg="honnef.co/go/tools/cmd/staticcheck@latest" ;;
+	esac
+	stage="$(mktemp -d "$CACHE/stage.XXXXXX")" || exit 1
+	GOBIN="$stage" go install "$pkg" && mv -f "$stage/$tool" "$TOOLS/$tool" || {
+		rm -rf "$stage"
+		echo "FAIL: $tool install failed"
+		exit 1
+	}
+	rm -rf "$stage"
+done
+
+echo "golangci-lint $GOLANGCI_LINT_VERSION, govulncheck, staticcheck ready in $TOOLS"

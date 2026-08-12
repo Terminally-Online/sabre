@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+GOLANGCI_LINT_VERSION="v2.11.3"
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+CACHE="$HOME/.cache/verify/sabre"
+TOOLS="$CACHE/bin"
+mkdir -p "$TOOLS"
+export GOLANGCI_LINT_CACHE="$CACHE/golangci"
+export CGO_ENABLED=0
+
+CORES="${VERIFY_CORES:-4}"
+export GOMAXPROCS="$CORES"
+
+SIGNOFF="${VERIFY_SIGNOFF:-}"
+
+lint_base() {
+	local base head
+	head="$(git rev-parse HEAD)"
+	base="$(git merge-base origin/master HEAD 2>/dev/null || true)"
+	if [[ -z "$base" || "$base" == "$head" ]]; then
+		git rev-parse HEAD~1
+	else
+		echo "$base"
+	fi
+}
