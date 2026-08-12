@@ -1,0 +1,40 @@
+version = 1
+name = "sabre"
+
+signoff = ["lint", "test", "build", "security"]
+
+[job.tools]
+run = "dev/verify.d/tools"
+leases = ["tool:sabre-cache"]
+cores = 1
+timeout_seconds = 600
+
+[job.fetch]
+run = "git fetch -q origin master"
+when = "signoff"
+leases = ["repo:git-index"]
+cores = 1
+timeout_seconds = 300
+
+[job.lint]
+needs = ["tools"]
+run = "dev/verify.d/lint"
+leases = ["tool:sabre-golangci"]
+cores = 2
+timeout_seconds = 900
+
+[job.test]
+run = "dev/verify.d/test"
+cores = 4
+timeout_seconds = 900
+
+[job.build]
+run = "dev/verify.d/build"
+cores = 2
+timeout_seconds = 600
+
+[job.security]
+needs = ["tools"]
+run = "dev/verify.d/security"
+cores = 2
+timeout_seconds = 900

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -uo pipefail
+source "$(dirname "$0")/common"
+
+"$TOOLS/govulncheck" ./... || exit 1
+"$TOOLS/staticcheck" ./... || exit 1
+
+docker_ready() {
+	command -v docker >/dev/null 2>&1 || return 1
+	docker info >/dev/null 2>&1 &
+	local pid=$! i
+	for i in $(seq 1 10); do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			wait "$pid"
+			return $?
+		fi
+		sleep 1
+	done
+	kill -9 "$pid" 2>/dev/null
+	return 1
+}
+
+if ! docker_ready; then
+	echo "FAIL: the secret scan needs docker and it is not responding."
+	echo "Start Docker Desktop, then rerun this lane."
+	exit 1
+fi
+
+docker run --rm -v "$ROOT:/pwd" trufflesecurity/trufflehog:latest \
+	filesystem --directory /pwd --only-verified --fail

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -uo pipefail
+source "$(dirname "$0")/common"
+
+for goos in linux windows darwin; do
+	GOOS="$goos" GOARCH=amd64 go build -o /dev/null ./cmd/sabre || exit 1
+done
