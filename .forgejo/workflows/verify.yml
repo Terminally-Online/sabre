@@ -1,0 +1,110 @@
+# Produces the commit statuses branch protection requires. Each job runs the
+# same command dev/verify.toml declares for it and posts the context
+# `dev/verify --signoff` has been posting by hand, so neither the protection
+# rules nor the local script change. dev/verify stays the way to run this on a
+# laptop; it just stops being the only thing that can post a status.
+#
+# runs-on: golang is the runner's Go image. It carries node because Forgejo
+# runs checkout and friends as JavaScript actions, so a job container without
+# node cannot check the repository out at all.
+name: verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  GOLANGCI_LINT_VERSION: v2.11.3
+
+jobs:
+  lint:
+    runs-on: golang
+    steps:
+      # Full history: lint runs --new-from-rev against the merge base, which
+      # needs both sides present.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: go vet and golangci-lint
+        run: |
+          set -euo pipefail
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          base="$(git merge-base origin/master HEAD 2>/dev/null || git rev-parse HEAD~1)"
+          go vet ./...
+          "$(go env GOPATH)/bin/golangci-lint" run --allow-parallel-runners --timeout=5m --new-from-rev="$base"
+      - name: Report signoff/lint
+        if: always()
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          state="${{ job.status == 'success' && 'success' || 'failure' }}"
+          curl -sSf -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/json" \
+            -d "{\"state\":\"$state\",\"context\":\"signoff/lint\",\"description\":\"go vet + golangci-lint\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\"}" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/statuses/$sha" > /dev/null
+          echo "posted signoff/lint=$state on $sha"
+
+  test:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: go test -race
+        run: go test -race -timeout 10m ./...
+      - name: Report signoff/test
+        if: always()
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          state="${{ job.status == 'success' && 'success' || 'failure' }}"
+          curl -sSf -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/json" \
+            -d "{\"state\":\"$state\",\"context\":\"signoff/test\",\"description\":\"go test -race\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\"}" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/statuses/$sha" > /dev/null
+          echo "posted signoff/test=$state on $sha"
+
+  build:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: cross build
+        run: |
+          set -euo pipefail
+          for goos in linux windows darwin; do
+            GOOS="$goos" GOARCH=amd64 go build -o /dev/null ./cmd/sabre
+          done
+      - name: Report signoff/build
+        if: always()
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          state="${{ job.status == 'success' && 'success' || 'failure' }}"
+          curl -sSf -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/json" \
+            -d "{\"state\":\"$state\",\"context\":\"signoff/build\",\"description\":\"linux, windows, darwin\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\"}" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/statuses/$sha" > /dev/null
+          echo "posted signoff/build=$state on $sha"
+
+  security:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: govulncheck, staticcheck, secret scan
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/staticcheck" ./...
+          # dev/verify.d/security reaches trufflehog through `docker run`,
+          # which is how a laptop gets the binary. A job container has no
+          # daemon, so take the binary directly — same scanner, same flags.
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          trufflehog filesystem --directory . --only-verified --fail
+      - name: Report signoff/security
+        if: always()
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          state="${{ job.status == 'success' && 'success' || 'failure' }}"
+          curl -sSf -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/json" \
+            -d "{\"state\":\"$state\",\"context\":\"signoff/security\",\"description\":\"govulncheck, staticcheck, trufflehog\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}\"}" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/statuses/$sha" > /dev/null
+          echo "posted signoff/security=$state on $sha"
