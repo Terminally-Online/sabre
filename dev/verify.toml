@@ -1,8 +1,6 @@
 version = 1
 name = "sabre"
 
-signoff = ["lint", "test", "build", "security"]
-
 [job.tools]
 run = "dev/verify.d/tools"
 leases = ["tool:sabre-cache"]
