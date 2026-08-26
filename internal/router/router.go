@@ -212,6 +212,15 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			body, _ = json.Marshal(reqs)
 		}
 
+		var minHead uint64
+		if isBatch {
+			for _, reqItem := range reqs {
+				minHead = max(minHead, backend.RequiredHead(reqItem.Method, reqItem.Params))
+			}
+		} else {
+			minHead = backend.RequiredHead(req.Method, req.Params)
+		}
+
 		var (
 			bk     *backend.Backend
 			status int
@@ -224,7 +233,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			if attempt > 1 {
 				zap.L().Warn("retry", zap.String("chain", chain), zap.String("method", method), zap.Int("attempt", attempt))
 			}
-			bk, err = lb.Pick(r.Context(), chain, "http")
+			bk, err = lb.PickAtLeast(r.Context(), chain, "http", minHead)
 			if err != nil {
 				if attempt == cfg.Sabre.MaxAttempts {
 					if isBatch {
@@ -275,6 +284,17 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 				status, hdrs, data, err = sendTo(r.Context(), bk, r.Header, body)
 			}
 
+			if err == nil && status == http.StatusOK && attempt < cfg.Sabre.MaxAttempts && backend.BlockUnavailable(data) {
+				bk.HeadBelow(minHead)
+				zap.L().Warn("block_unavailable",
+					zap.String("chain", chain),
+					zap.String("method", method),
+					zap.String("backend", bk.Name),
+					zap.Uint64("min_head", minHead),
+				)
+				continue
+			}
+
 			if err == nil && !isRetryableStatus(status) {
 				upstream = bk.Name
 				lb.UpdateLatency(bk, time.Since(start), cfg.Performance)
@@ -315,9 +335,10 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 								blockNum, blockHash := backend.ExtractBlockInfo(respBytes)
 								if blockNum > 0 {
 									cstore.UpdateLatestBlock(chain, blockNum, blockHash, respBytes)
+									bk.ObserveHead(blockNum)
 								}
 
-								if i < len(originalReqs) {
+								if i < len(originalReqs) && !backend.IsErrorResponse(respBytes) {
 									reqItem := originalReqs[i]
 									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
 									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
@@ -330,6 +351,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 					} else {
 						if blockNum, blockHash := backend.ExtractBlockInfo(data); blockNum > 0 {
 							cstore.UpdateLatestBlock(chain, blockNum, blockHash, data)
+							bk.ObserveHead(blockNum)
 						}
 					}
 				}

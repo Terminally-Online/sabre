@@ -372,3 +372,134 @@ func TestLoadBalancer_GetWeights(t *testing.T) {
 		t.Error("expected returned slice to be a copy, not a reference")
 	}
 }
+
+func TestLoadBalancer_PickAtLeast(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		heads    [2]uint64
+		minHead  uint64
+		wantName map[string]bool
+	}{
+		{
+			name:     "excludes backend with known lower head",
+			heads:    [2]uint64{100, 200},
+			minHead:  150,
+			wantName: map[string]bool{"backend2": true},
+		},
+		{
+			name:     "keeps backend with unknown head",
+			heads:    [2]uint64{0, 100},
+			minHead:  150,
+			wantName: map[string]bool{"backend1": true},
+		},
+		{
+			name:     "head equal to minHead is eligible",
+			heads:    [2]uint64{150, 100},
+			minHead:  150,
+			wantName: map[string]bool{"backend1": true},
+		},
+		{
+			name:     "falls back to any healthy backend when all known heads are below",
+			heads:    [2]uint64{100, 120},
+			minHead:  150,
+			wantName: map[string]bool{"backend1": true, "backend2": true},
+		},
+		{
+			name:     "zero minHead applies no exclusion",
+			heads:    [2]uint64{1, 2},
+			minHead:  0,
+			wantName: map[string]bool{"backend1": true, "backend2": true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := createTestConfig()
+			lb := NewLoadBalancer(cfg)
+			bes := lb.GetBackends("ethereum")
+			bes[0].Head.Store(tt.heads[0])
+			bes[1].Head.Store(tt.heads[1])
+
+			for range 50 {
+				b, err := lb.PickAtLeast(ctx, "ethereum", "http", tt.minHead)
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				if !tt.wantName[b.Name] {
+					t.Fatalf("picked %s, want one of %v", b.Name, tt.wantName)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadBalancer_PickAtLeastNoHealthyBackends(t *testing.T) {
+	cfg := createTestConfig()
+	lb := NewLoadBalancer(cfg)
+	for _, b := range lb.GetBackends("ethereum") {
+		b.HealthUp.Store(false)
+	}
+
+	b, err := lb.PickAtLeast(context.Background(), "ethereum", "http", 10)
+	if err == nil {
+		t.Error("expected error when no healthy backends exist")
+	}
+	if b != nil {
+		t.Error("expected nil backend when no healthy backends exist")
+	}
+}
+
+func TestBackend_ObserveHead(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial uint64
+		observe uint64
+		want    uint64
+	}{
+		{name: "sets from unknown", initial: 0, observe: 10, want: 10},
+		{name: "raises", initial: 10, observe: 20, want: 20},
+		{name: "never lowers", initial: 20, observe: 10, want: 20},
+		{name: "equal is a no-op", initial: 20, observe: 20, want: 20},
+		{name: "zero observation is ignored", initial: 20, observe: 0, want: 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := createTestBackend("b", "ethereum", "https://api.example.com")
+			b.Head.Store(tt.initial)
+			b.ObserveHead(tt.observe)
+			if got := b.Head.Load(); got != tt.want {
+				t.Errorf("head %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBackend_HeadBelow(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial uint64
+		below   uint64
+		want    uint64
+	}{
+		{name: "lowers unknown head", initial: 0, below: 100, want: 99},
+		{name: "lowers head at or above", initial: 150, below: 100, want: 99},
+		{name: "lowers head equal", initial: 100, below: 100, want: 99},
+		{name: "keeps head already below", initial: 50, below: 100, want: 50},
+		{name: "zero is a no-op", initial: 50, below: 0, want: 50},
+		{name: "below one leaves head unknown", initial: 5, below: 1, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := createTestBackend("b", "ethereum", "https://api.example.com")
+			b.Head.Store(tt.initial)
+			b.HeadBelow(tt.below)
+			if got := b.Head.Load(); got != tt.want {
+				t.Errorf("head %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

@@ -1610,3 +1610,186 @@ func TestRouter_BatchedEthCallRevertReturnsErrorEnvelope(t *testing.T) {
 		assertRevertEnvelope(t, responses[1], "2")
 	})
 }
+
+func newHeightBackend(t *testing.T, name string, stale bool, hits *atomic.Int64) *backend.Backend {
+	t.Helper()
+	bk := backend.CreateMockBackend(name, "ethereum", "https://"+name+".example.com")
+	bk.HealthUp.Store(true)
+	bk.Client = &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var m struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(body, &m); err != nil {
+			return nil, err
+		}
+		hits.Add(1)
+		var out []byte
+		if stale {
+			out, _ = json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      m.ID,
+				"error":   map[string]any{"code": -32000, "message": "header not found"},
+			})
+		} else {
+			out, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": "0x1234"})
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+			Request:    r,
+		}, nil
+	})}
+	return bk
+}
+
+// TestRouter_BlockUnavailableRetriesOnHigherHead pins eth_getBalance to a
+// numeric block against one upstream that has not imported it (JSON-RPC error
+// under HTTP 200) and one that has. The router must answer with the result,
+// lower the stale upstream's known head so it is excluded from later picks at
+// that height, and never cache the error body.
+func TestRouter_BlockUnavailableRetriesOnHigherHead(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	var staleHits, freshHits atomic.Int64
+	stale := newHeightBackend(t, "stale", true, &staleHits)
+	fresh := newHeightBackend(t, "fresh", false, &freshHits)
+
+	cfg := createTestConfig()
+	cfg.Sabre.MaxAttempts = 3
+	cfg.Backends = []*backend.Backend{stale, fresh}
+	cfg.BackendsCt = map[string]int{"ethereum": 2}
+
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	const baseBlock = uint64(0x1000)
+	requestAt := func(block uint64) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "eth_getBalance",
+			"params":  []any{"0x000000000000000000000000000000000000dead", fmt.Sprintf("0x%x", block)},
+		})
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		return w
+	}
+	assertResult := func(t *testing.T, w *httptest.ResponseRecorder, block uint64) {
+		t.Helper()
+		if w.Code != http.StatusOK {
+			t.Fatalf("block 0x%x: status %d, want 200; body: %s", block, w.Code, w.Body.String())
+		}
+		var resp struct {
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("block 0x%x: bad response %v: %s", block, err, w.Body.String())
+		}
+		if len(resp.Error) > 0 {
+			t.Fatalf("block 0x%x: error passed through instead of retried: %s", block, w.Body.String())
+		}
+		if string(resp.Result) != `"0x1234"` {
+			t.Fatalf("block 0x%x: result %s, want \"0x1234\"", block, resp.Result)
+		}
+	}
+
+	// Picks are weighted-random, so ascend through distinct blocks until the
+	// stale upstream has been picked once. From that point its known head is
+	// below every later block and it must never be picked again.
+	var staleBlock uint64
+	for i := range uint64(32) {
+		block := baseBlock + i
+		w := requestAt(block)
+		assertResult(t, w, block)
+		if w.Header().Get("X-Cache") != "miss" {
+			t.Fatalf("block 0x%x: expected upstream miss, got %q", block, w.Header().Get("X-Cache"))
+		}
+		if staleHits.Load() > 0 {
+			staleBlock = block
+			break
+		}
+	}
+	if staleBlock == 0 {
+		t.Fatal("stale upstream was never picked across 32 requests")
+	}
+	if got := stale.Head.Load(); got == 0 || got >= staleBlock {
+		t.Errorf("stale head %d, want known and below 0x%x", got, staleBlock)
+	}
+
+	for i := uint64(1); i <= 8; i++ {
+		block := staleBlock + i
+		assertResult(t, requestAt(block), block)
+	}
+	if got := staleHits.Load(); got != 1 {
+		t.Errorf("stale upstream hit %d times, want exactly 1 (excluded after its head was lowered)", got)
+	}
+
+	w := requestAt(staleBlock)
+	assertResult(t, w, staleBlock)
+	if got := w.Header().Get("X-Cache"); got != "hit" {
+		t.Errorf("repeat request at 0x%x: X-Cache %q, want hit (the fresh result should be cached)", staleBlock, got)
+	}
+}
+
+// TestRouter_BlockUnavailablePassesThroughOnFinalAttempt guards the terminal
+// case: with every upstream behind the requested block, the last attempt's
+// error reaches the caller unchanged and is still not cached.
+func TestRouter_BlockUnavailablePassesThroughOnFinalAttempt(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	var hits atomic.Int64
+	stale := newHeightBackend(t, "stale", true, &hits)
+
+	cfg := createTestConfig()
+	cfg.Sabre.MaxAttempts = 2
+	cfg.Backends = []*backend.Backend{stale}
+	cfg.BackendsCt = map[string]int{"ethereum": 1}
+
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x000000000000000000000000000000000000dead","0x1abc"]}`)
+	do := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		return w
+	}
+
+	w := do()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "header not found") {
+		t.Fatalf("final attempt must pass the upstream error through, got: %s", w.Body.String())
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("upstream hit %d times, want 2 (one retry, then pass-through)", got)
+	}
+	if got := stale.Head.Load(); got != 0x1abb {
+		t.Errorf("stale head %#x, want 0x1abb", got)
+	}
+
+	w = do()
+	if got := w.Header().Get("X-Cache"); got != "miss" {
+		t.Errorf("repeat request: X-Cache %q, want miss (error bodies are never cached)", got)
+	}
+	if got := hits.Load(); got != 4 {
+		t.Errorf("upstream hit %d times, want 4 (repeat went upstream again)", got)
+	}
+}

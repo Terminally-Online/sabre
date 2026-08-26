@@ -426,6 +426,9 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 		s.cacheImmutableCall(chain, target, callData, response)
 		return
 	}
+	if IsErrorResponse(response) {
+		return
+	}
 	ttl := TTL(method, params, s.cfg, subsCfg)
 	if ttl <= 0 {
 		return
