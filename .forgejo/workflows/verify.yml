@@ -1,0 +1,69 @@
+# The merge gate. Branch protection requires the check each job here records,
+# so a commit is mergeable exactly when this workflow is green on it. Every job
+# runs the command dev/verify runs for it; dev/verify remains the laptop edit
+# loop, it does not certify.
+#
+# runs-on: golang is the runner's Go image. It carries node because Forgejo
+# runs checkout and friends as JavaScript actions, so a job container without
+# node cannot check the repository out at all.
+name: verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  GOLANGCI_LINT_VERSION: v2.11.3
+
+jobs:
+  lint:
+    runs-on: golang
+    steps:
+      # Full history: lint runs --new-from-rev against the merge base, which
+      # needs both sides present.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: go vet and golangci-lint
+        run: |
+          set -euo pipefail
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          base="$(git merge-base origin/master HEAD 2>/dev/null || git rev-parse HEAD~1)"
+          go vet ./...
+          "$(go env GOPATH)/bin/golangci-lint" run --allow-parallel-runners --timeout=5m --new-from-rev="$base"
+
+  test:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: go test -race
+        run: go test -race -timeout 10m ./...
+
+  build:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: cross build
+        run: |
+          set -euo pipefail
+          for goos in linux windows darwin; do
+            GOOS="$goos" GOARCH=amd64 go build -o /dev/null ./cmd/sabre
+          done
+
+  security:
+    runs-on: golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: govulncheck, staticcheck, secret scan
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/staticcheck" ./...
+          # dev/verify.d/security reaches trufflehog through `docker run`,
+          # which is how a laptop gets the binary. A job container has no
+          # daemon, so take the binary directly — same scanner, same flags.
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          trufflehog filesystem --directory . --only-verified --fail
