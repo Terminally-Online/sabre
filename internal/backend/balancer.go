@@ -53,6 +53,14 @@ func NewLoadBalancer(cfg Config) *LoadBalancer {
 
 // Pick selects a healthy backend for the given chain and scheme (http/ws) using weighted random selection.
 func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backend, error) {
+	return lb.PickAtLeast(ctx, chain, scheme, 0)
+}
+
+// PickAtLeast selects a healthy backend like Pick, additionally excluding any
+// backend whose known head is below minHead. A backend with no head knowledge
+// is eligible. When the exclusion leaves nothing to serve from, selection falls
+// back to the full healthy set so the request is served rather than failed.
+func (lb *LoadBalancer) PickAtLeast(ctx context.Context, chain, scheme string, minHead uint64) (*Backend, error) {
 	lb.mu.RLock()
 	bes := lb.backends[chain]
 	weights := lb.weights[chain]
@@ -71,14 +79,7 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backen
 
 	for i := range bes {
 		b := bes[i]
-		if !b.HealthUp.Load() {
-			continue
-		}
-
-		if scheme == "ws" && b.WSURL == nil {
-			continue
-		}
-		if scheme == "http" && b.URL == nil {
+		if !candidate(b, scheme, minHead) {
 			continue
 		}
 
@@ -95,14 +96,7 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backen
 
 		for i := range bes {
 			b := bes[i]
-			if !b.HealthUp.Load() {
-				continue
-			}
-
-			if scheme == "ws" && b.WSURL == nil {
-				continue
-			}
-			if scheme == "http" && b.URL == nil {
+			if !candidate(b, scheme, minHead) {
 				continue
 			}
 
@@ -126,6 +120,9 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backen
 		}
 
 		if minIdx == -1 {
+			if minHead > 0 {
+				return lb.PickAtLeast(ctx, chain, scheme, 0)
+			}
 			if scheme == "ws" {
 				return nil, fmt.Errorf("no WebSocket-enabled backends for chain %q", chain)
 			}
@@ -174,6 +171,26 @@ func (lb *LoadBalancer) Pick(ctx context.Context, chain, scheme string) (*Backen
 	}
 
 	return bes[ready[len(ready)-1]], nil
+}
+
+// candidate reports whether a backend is healthy, serves the scheme, and is not
+// known to trail minHead.
+func candidate(b *Backend, scheme string, minHead uint64) bool {
+	if !b.HealthUp.Load() {
+		return false
+	}
+	if scheme == "ws" && b.WSURL == nil {
+		return false
+	}
+	if scheme == "http" && b.URL == nil {
+		return false
+	}
+	if minHead > 0 {
+		if head := b.Head.Load(); head > 0 && head < minHead {
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateLatency updates the performance metrics for a backend and recalculates weights.
@@ -294,8 +311,11 @@ func (lb *LoadBalancer) probe(b *Backend, body []byte, cfg Config, cacheStore *S
 
 	lb.UpdateLatency(b, d, cfg.Performance)
 
+	respBody, _ := io.ReadAll(resp.Body)
+	if head, ok := HeadFromResponse(respBody); ok {
+		b.ObserveHead(head)
+	}
 	if cacheStore != nil {
-		respBody, _ := io.ReadAll(resp.Body)
 		cacheStore.CheckReorgFromHealthResponse(respBody, b.Chain)
 	}
 

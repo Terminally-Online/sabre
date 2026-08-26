@@ -724,3 +724,314 @@ func TestRewriteResponseID(t *testing.T) {
 		}
 	})
 }
+
+func TestStore_DoesNotCacheErrorResponse(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("expected no error creating store, got %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	params := json.RawMessage(`["0x000000000000000000000000000000000000dead","0x1abc"]`)
+	tests := []struct {
+		name     string
+		response string
+		cached   bool
+	}{
+		{
+			name:     "error body is not cached",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}`,
+			cached:   false,
+		},
+		{
+			name:     "null error is cached",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0x1","error":null}`,
+			cached:   true,
+		},
+		{
+			name:     "result body is cached",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0x1"}`,
+			cached:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := json.RawMessage(bytes.Replace(params, []byte("dead"), []byte(fmt.Sprintf("%04x", len(tt.name))), 1))
+			store.Store("ethereum", "eth_getBalance", p, []byte(tt.response), nil)
+			key, _ := CanonicalKey("ethereum", "eth_getBalance", p)
+			_, found := store.Get(key)
+			if found != tt.cached {
+				t.Errorf("cached %v, want %v", found, tt.cached)
+			}
+		})
+	}
+}
+
+func TestHeadFromResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     uint64
+		wantOK   bool
+	}{
+		{
+			name:     "eth_blockNumber quantity",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0x1abc"}`,
+			want:     0x1abc,
+			wantOK:   true,
+		},
+		{
+			name:     "block object",
+			response: `{"jsonrpc":"2.0","id":1,"result":{"number":"0x2b","hash":"0xabc"}}`,
+			want:     0x2b,
+			wantOK:   true,
+		},
+		{
+			name:     "error body",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom"}}`,
+			wantOK:   false,
+		},
+		{
+			name:     "null result",
+			response: `{"jsonrpc":"2.0","id":1,"result":null}`,
+			wantOK:   false,
+		},
+		{
+			name:     "non-quantity string",
+			response: `{"jsonrpc":"2.0","id":1,"result":"latest"}`,
+			wantOK:   false,
+		},
+		{
+			name:     "malformed",
+			response: `not json`,
+			wantOK:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := HeadFromResponse([]byte(tt.response))
+			if ok != tt.wantOK {
+				t.Fatalf("ok %v, want %v", ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("head %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequiredHead(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		params string
+		want   uint64
+	}{
+		{
+			name:   "eth_getBalance numeric tag",
+			method: "eth_getBalance",
+			params: `["0x000000000000000000000000000000000000dead","0x1abc"]`,
+			want:   0x1abc,
+		},
+		{
+			name:   "eth_getBalance latest",
+			method: "eth_getBalance",
+			params: `["0x000000000000000000000000000000000000dead","latest"]`,
+			want:   0,
+		},
+		{
+			name:   "eth_getBalance finalized",
+			method: "eth_getBalance",
+			params: `["0x000000000000000000000000000000000000dead","finalized"]`,
+			want:   0,
+		},
+		{
+			name:   "eth_getBalance missing tag",
+			method: "eth_getBalance",
+			params: `["0x000000000000000000000000000000000000dead"]`,
+			want:   0,
+		},
+		{
+			name:   "eth_call numeric tag",
+			method: "eth_call",
+			params: `[{"to":"0x000000000000000000000000000000000000dead","data":"0x"},"0x10"]`,
+			want:   0x10,
+		},
+		{
+			name:   "eth_call numeric tag with state override",
+			method: "eth_call",
+			params: `[{"to":"0x000000000000000000000000000000000000dead","data":"0x"},"0x10",{}]`,
+			want:   0x10,
+		},
+		{
+			name:   "eth_call block object tag",
+			method: "eth_call",
+			params: `[{"to":"0x000000000000000000000000000000000000dead","data":"0x"},{"blockHash":"0xabc"}]`,
+			want:   0,
+		},
+		{
+			name:   "eth_getStorageAt numeric tag",
+			method: "eth_getStorageAt",
+			params: `["0x000000000000000000000000000000000000dead","0x0","0x20"]`,
+			want:   0x20,
+		},
+		{
+			name:   "eth_getBlockByNumber numeric tag",
+			method: "eth_getBlockByNumber",
+			params: `["0xff",false]`,
+			want:   0xff,
+		},
+		{
+			name:   "eth_getBlockByNumber pending",
+			method: "eth_getBlockByNumber",
+			params: `["pending",false]`,
+			want:   0,
+		},
+		{
+			name:   "eth_getLogs numeric toBlock",
+			method: "eth_getLogs",
+			params: `[{"fromBlock":"0x1","toBlock":"0x2a"}]`,
+			want:   0x2a,
+		},
+		{
+			name:   "eth_getLogs latest toBlock",
+			method: "eth_getLogs",
+			params: `[{"fromBlock":"0x1","toBlock":"latest"}]`,
+			want:   0,
+		},
+		{
+			name:   "eth_getLogs without toBlock",
+			method: "eth_getLogs",
+			params: `[{"fromBlock":"0x1"}]`,
+			want:   0,
+		},
+		{
+			name:   "unknown method",
+			method: "eth_blockNumber",
+			params: `[]`,
+			want:   0,
+		},
+		{
+			name:   "malformed params",
+			method: "eth_getBalance",
+			params: `{`,
+			want:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RequiredHead(tt.method, json.RawMessage(tt.params)); got != tt.want {
+				t.Errorf("RequiredHead = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBlockUnavailable(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     bool
+	}{
+		{
+			name:     "header not found",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}`,
+			want:     true,
+		},
+		{
+			name:     "missing trie node",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"missing trie node 0xabc (path ) state 0xdef is not available"}}`,
+			want:     true,
+		},
+		{
+			name:     "unknown block case insensitive",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Unknown Block"}}`,
+			want:     true,
+		},
+		{
+			name:     "block not found",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"block not found"}}`,
+			want:     true,
+		},
+		{
+			name:     "block N not found",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"block 0x1abc not found"}}`,
+			want:     true,
+		},
+		{
+			name:     "state not available",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"required historical state not available"}}`,
+			want:     true,
+		},
+		{
+			name:     "cannot query unfinalized",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"cannot query unfinalized data"}}`,
+			want:     true,
+		},
+		{
+			name:     "execution reverted",
+			response: `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`,
+			want:     false,
+		},
+		{
+			name:     "result",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0x1"}`,
+			want:     false,
+		},
+		{
+			name:     "null error",
+			response: `{"jsonrpc":"2.0","id":1,"result":"0x1","error":null}`,
+			want:     false,
+		},
+		{
+			name:     "batch with one unavailable",
+			response: `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"header not found"}}]`,
+			want:     true,
+		},
+		{
+			name:     "batch with reverts only",
+			response: `[{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}},{"jsonrpc":"2.0","id":2,"result":"0x1"}]`,
+			want:     false,
+		},
+		{
+			name:     "malformed",
+			response: `not json`,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BlockUnavailable([]byte(tt.response)); got != tt.want {
+				t.Errorf("BlockUnavailable = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsErrorResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     bool
+	}{
+		{name: "error", response: `{"jsonrpc":"2.0","id":1,"error":{"code":1,"message":"x"}}`, want: true},
+		{name: "null error", response: `{"jsonrpc":"2.0","id":1,"result":"0x1","error":null}`, want: false},
+		{name: "result", response: `{"jsonrpc":"2.0","id":1,"result":"0x1"}`, want: false},
+		{name: "malformed", response: `[`, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsErrorResponse([]byte(tt.response)); got != tt.want {
+				t.Errorf("IsErrorResponse = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
