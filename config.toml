@@ -298,30 +298,26 @@ ttl_latest_ms = 250
 # hot cache without storing data that you aren't actually using.
 ttl_block_ms = 86400000
 
-# QuickNode is a fast, reliable, and pretty affordable Ethereum node provider.
-# At Terminally Online we run our own nodes, but QuickNode is our fallback when
-# ours is fully saturated or when we need to scale quickly. If you don't already
-# have a high-throughput endpoint, go ahead and get one:
-#
-# → Get yours at: https://quicknode.com/signup?via=chance
-[quicknode]
-# QuickNode plan allows 500 requests per second.
-max_per_second = 500
+# Your own node is the primary backend. At Terminally Online every request
+# goes to Reth nodes we run ourselves, reached over a private address, so the
+# hop is local and unmetered and the limit below exists only to say so.
+[reth]
+max_per_second = 100000
 
 # Chain support has been completely abstracted away from the codebase. Due to this,
 # when you define a new chain, you do that by including a chain name suffix like the
 # one below. This allows you to define multiple chains with different providers while
 # sharing the configuration of that single provider. Further, in the case that a 
 # provider has a chain-agnostic endpoint you can define that by setting the title
-# to something like: [quicknode.ethereum,base] or [quicknode.1,8453].
+# to something like: [reth.ethereum,base] or [reth.1,8453].
 #
 # For providers that offer chain-specific URLs, you can use the CHAIN_NAME placeholder
 # in your URL configuration. sabre will automatically replace CHAIN_NAME with the
 # actual chain name when creating backends. You can freely combine CHAIN_NAME with
 # environment variables in the same URL. For example:
-#   url = "https://${QUICKNODE_NAME}.CHAIN_NAME.quiknode.pro/${QUICKNODE_ID}/"
-#   This would become: https://your-name.ethereum.quiknode.pro/your-id/ for ethereum
-#   And: https://your-name.base.quiknode.pro/your-id/ for base
+#   url = "https://${API_HOST}.CHAIN_NAME.example.com/${API_KEY}/"
+#   This would become: https://your-host.ethereum.example.com/your-key/ for ethereum
+#   And: https://your-host.base.example.com/your-key/ for base
 #
 # Environment variables (${VAR_NAME}) are processed first by the system, then CHAIN_NAME
 # replacement occurs during backend creation. This allows flexible configurations like:
@@ -329,9 +325,9 @@ max_per_second = 500
 #
 # If your URL doesn't contain CHAIN_NAME, sabre will use the same URL for all chains
 # in the configuration, which is the traditional behavior.
-[quicknode.1]
-url = "https://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
-ws_url = "wss://${QUICKNODE_NAME}.quiknode.pro/${QUICKNODE_ID}/"
+[reth.1]
+url = "${RETH_URL}"
+ws_url = "${RETH_WS_URL}"
 
 # Drpc is a decentralized RPC node provider to Ethereum, Polygon, Arbitrum and others
 # that avoid the typical concerns that exist when using centralized providers. At
