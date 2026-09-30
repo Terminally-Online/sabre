@@ -60,7 +60,7 @@ ttl_block_ms = 86400000
 max_reorg_depth = 100
 clean = true
 
-[quicknode.1]
+[reth.1]
 url = "https://api.example.com"
 ws_url = "wss://api.example.com"
 `
@@ -256,7 +256,7 @@ ttl_block_ms = 172800000
 max_reorg_depth = 200
 clean = true
 
-[quicknode.1]
+[reth.1]
 url = "https://api.example.com"
 ws_url = "wss://api.example.com"
 `
@@ -429,7 +429,7 @@ ws_url = "wss://api.example.com"
 
 func TestParseConfig_BackendCreation(t *testing.T) {
 	configContent := `
-[quicknode]
+[reth]
 max_per_second = 50
 ethereum = { url = "https://api.example.com", ws_url = "wss://api.example.com" }
 
@@ -451,24 +451,24 @@ ethereum = { url = "https://eth-mainnet.alchemyapi.io/v2/KEY", ws_url = "wss://e
 		t.Errorf("expected 2 backends, got %d", len(cfg.Backends))
 	}
 
-	foundQuicknode := false
+	foundReth := false
 	for _, backend := range cfg.Backends {
-		if backend.Name == "quicknode" {
-			foundQuicknode = true
+		if backend.Name == "reth" {
+			foundReth = true
 			if backend.URL.String() != "https://api.example.com" {
-				t.Errorf("expected quicknode URL https://api.example.com, got %s", backend.URL.String())
+				t.Errorf("expected reth URL https://api.example.com, got %s", backend.URL.String())
 			}
 			if backend.WSURL.String() != "wss://api.example.com" {
-				t.Errorf("expected quicknode WS URL wss://api.example.com, got %s", backend.WSURL.String())
+				t.Errorf("expected reth WS URL wss://api.example.com, got %s", backend.WSURL.String())
 			}
 			if backend.limiter == nil {
-				t.Error("expected quicknode backend to have rate limiter")
+				t.Error("expected reth backend to have rate limiter")
 			}
 			break
 		}
 	}
-	if !foundQuicknode {
-		t.Error("quicknode backend not found")
+	if !foundReth {
+		t.Error("reth backend not found")
 	}
 
 	foundAlchemy := false
@@ -514,7 +514,7 @@ ethereum = { url = "https://eth-mainnet.alchemyapi.io/v2/KEY", ws_url = "wss://e
 
 func TestParseConfig_ChainNameReplacement(t *testing.T) {
 	configContent := `
-[quicknode]
+[reth]
 ethereum = { url = "https://api.example.com/CHAIN_NAME", ws_url = "wss://api.example.com/CHAIN_NAME" }
 
 [multi]
@@ -595,7 +595,7 @@ func TestParseConfig_EnvironmentVariableExpansion(t *testing.T) {
 [sabre]
 listen = "${API_URL}:3000"
 
-[quicknode]
+[reth]
 ethereum = { url = "${API_URL}/v1/${API_KEY}", ws_url = "${WS_URL}/v1/${API_KEY}" }
 `
 
@@ -634,7 +634,7 @@ max_batch_size = 15
 max_batch_wait_ms = 75
 max_batch_workers = 6
 
-[quicknode]
+[reth]
 ethereum = { url = "https://api.example.com" }
 `
 
@@ -680,7 +680,7 @@ listen = ":3000"
 
 func TestParseConfig_InvalidURL(t *testing.T) {
 	configContent := `
-[quicknode]
+[reth]
 ethereum = { url = "://invalid-url" }
 `
 
@@ -702,7 +702,7 @@ ethereum = { url = "://invalid-url" }
 
 func TestParseConfig_InvalidWSURL(t *testing.T) {
 	configContent := `
-[quicknode]
+[reth]
 ethereum = { url = "https://api.example.com", ws_url = "://invalid-ws-url" }
 `
 
@@ -724,7 +724,7 @@ ethereum = { url = "https://api.example.com", ws_url = "://invalid-ws-url" }
 
 func TestParseConfig_MissingURL(t *testing.T) {
 	configContent := `
-[quicknode]
+[reth]
 ethereum = { ws_url = "wss://api.example.com" }
 `
 
@@ -764,7 +764,7 @@ enabled = true
 path = "` + cachePath + `"
 clean = true
 
-[quicknode]
+[reth]
 ethereum = { url = "https://api.example.com" }
 `
 
@@ -800,7 +800,7 @@ enabled = true
 path = "/"
 clean = true
 
-[quicknode]
+[reth]
 ethereum = { url = "https://api.example.com" }
 `
 
