@@ -308,11 +308,12 @@ ttl_block_ms = 86400000
 block_time_ms = 12000
 max_reorg_depth = 100
 
-# Base produces a block every two seconds and finalizes once its batches do on
-# Ethereum, so the twenty minutes mainnet gets from 100 blocks is 600 here.
+# Base produces a block every two seconds and finalizes once the L1 batch
+# carrying a block does, which runs 450-750 blocks behind head. 1800 is one
+# hour of Base blocks.
 [cache.chains.8453]
 block_time_ms = 2000
-max_reorg_depth = 600
+max_reorg_depth = 1800
 
 # Your own node is the primary backend. At Terminally Online every request
 # goes to Reth nodes we run ourselves, reached over a private address, so the
