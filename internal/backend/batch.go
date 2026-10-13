@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,7 +60,7 @@ type BatchProcessor struct {
 	multicall     MulticallConfig
 
 	batches map[string]*Batch
-	workers chan struct{}
+	workers map[string]chan struct{}
 }
 
 // batchEntry pairs a caller's original request with its private response
@@ -67,6 +69,7 @@ type BatchProcessor struct {
 // independent clients coalesced into one upstream batch (two clients both
 // using id 1 would otherwise receive each other's payloads).
 type batchEntry struct {
+	ctx context.Context
 	req BatchRequest
 	ch  chan BatchResponse
 }
@@ -77,6 +80,7 @@ type Batch struct {
 	Client     *http.Client
 	Created    time.Time
 	dispatch   chan struct{}
+	workers    chan struct{}
 	mu         sync.Mutex
 	entries    []batchEntry
 }
@@ -90,13 +94,31 @@ func NewBatchProcessor(maxBatchSize int, maxWaitTime time.Duration, maxConcurren
 		maxRetries:    maxRetries,
 		multicall:     multicall,
 		batches:       make(map[string]*Batch),
-		workers:       make(chan struct{}, maxConcurrent),
+		workers:       make(map[string]chan struct{}),
 	}
 }
 
+// pool returns the worker semaphore bounding in-flight batches to backendURL.
+func (bp *BatchProcessor) pool(backendURL string) chan struct{} {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	return bp.poolLocked(backendURL)
+}
+
+func (bp *BatchProcessor) poolLocked(backendURL string) chan struct{} {
+	workers, ok := bp.workers[backendURL]
+	if !ok {
+		workers = make(chan struct{}, bp.maxConcurrent)
+		bp.workers[backendURL] = workers
+	}
+	return workers
+}
+
 // AddRequest adds a request to a batch and returns a channel that receives
-// exactly one response for this request.
-func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest, client *http.Client) (<-chan BatchResponse, error) {
+// exactly one response for this request. ctx is the caller's wait: once it is
+// done the request is dropped rather than sent, and an upstream call is
+// cancelled once every request it carries has been abandoned.
+func (bp *BatchProcessor) AddRequest(ctx context.Context, backendURL string, req BatchRequest, client *http.Client) (<-chan BatchResponse, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -107,6 +129,7 @@ func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest, client
 			Client:     client,
 			Created:    time.Now(),
 			dispatch:   make(chan struct{}),
+			workers:    bp.poolLocked(backendURL),
 			entries:    make([]batchEntry, 0, bp.maxBatchSize),
 		}
 		bp.batches[backendURL] = batch
@@ -136,7 +159,7 @@ func (bp *BatchProcessor) AddRequest(backendURL string, req BatchRequest, client
 	responseChan := make(chan BatchResponse, 1)
 
 	batch.mu.Lock()
-	batch.entries = append(batch.entries, batchEntry{req: reqCopy, ch: responseChan})
+	batch.entries = append(batch.entries, batchEntry{ctx: ctx, req: reqCopy, ch: responseChan})
 	full := len(batch.entries) >= bp.maxBatchSize
 	batch.mu.Unlock()
 
@@ -178,6 +201,30 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 		return
 	}
 
+	ctx, release := callers(entries)
+	defer release()
+
+	select {
+	case batch.workers <- struct{}{}:
+	case <-ctx.Done():
+		abandon(entries)
+		return
+	}
+
+	live := make([]batchEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.ctx.Err() == nil {
+			live = append(live, e)
+		} else {
+			abandon([]batchEntry{e})
+		}
+	}
+	entries = live
+	if len(entries) == 0 {
+		<-batch.workers
+		return
+	}
+
 	// Requests go upstream under positional wire ids (the entry index).
 	// Client-supplied ids are NOT unique across the coalesced clients, so
 	// they can never be used to route responses. The original id is
@@ -195,9 +242,8 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 	}
 
 	responses, err := func() ([]BatchResponse, error) {
-		bp.workers <- struct{}{}
-		defer func() { <-bp.workers }()
-		return bp.sendBatch(batch, requests)
+		defer func() { <-batch.workers }()
+		return bp.sendBatch(ctx, batch, requests)
 	}()
 
 	// Expand multicall responses back into individual responses.
@@ -245,6 +291,41 @@ func (bp *BatchProcessor) processBatch(batch *Batch) {
 
 var errMissingUpstreamResponse = errors.New("upstream batch response missing")
 
+// callers returns a context that ends once every entry's caller has stopped
+// waiting, and a release that detaches it from the entries.
+func callers(entries []batchEntry) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var waiting atomic.Int64
+	waiting.Store(int64(len(entries)))
+	stops := make([]func() bool, len(entries))
+	for i, e := range entries {
+		stops[i] = context.AfterFunc(e.ctx, func() {
+			if waiting.Add(-1) == 0 {
+				cancel()
+			}
+		})
+	}
+	return ctx, func() {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+	}
+}
+
+// abandon answers entries whose callers stopped waiting before they were sent.
+func abandon(entries []batchEntry) {
+	for _, e := range entries {
+		err := context.Cause(e.ctx)
+		e.ch <- BatchResponse{
+			JSONRPC:     "2.0",
+			ID:          e.req.ID,
+			Error:       rawJSON(map[string]any{"code": -32603, "message": "Internal error: " + err.Error()}),
+			InternalErr: err,
+		}
+	}
+}
+
 // parseWireID decodes a positional wire id assigned by processBatch. Upstreams
 // must echo ids verbatim, but a quoted echo is tolerated.
 func parseWireID(id json.RawMessage) (int, bool) {
@@ -262,7 +343,7 @@ func rawJSON(v any) json.RawMessage {
 	return b
 }
 
-func (bp *BatchProcessor) sendBatch(batch *Batch, requests []BatchRequest) ([]BatchResponse, error) {
+func (bp *BatchProcessor) sendBatch(ctx context.Context, batch *Batch, requests []BatchRequest) ([]BatchResponse, error) {
 	batchBody, err := json.Marshal(requests)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
@@ -278,10 +359,16 @@ func (bp *BatchProcessor) sendBatch(batch *Batch, requests []BatchRequest) ([]Ba
 		if attempt > 0 {
 			base := time.Duration(50<<uint(attempt-1)) * time.Millisecond
 			jitter := time.Duration(rand.Int64N(int64(base / 2)))
-			time.Sleep(base + jitter)
+			backoff := time.NewTimer(base + jitter)
+			select {
+			case <-backoff.C:
+			case <-ctx.Done():
+				backoff.Stop()
+				return nil, fmt.Errorf("batch callers left: %w", context.Cause(ctx))
+			}
 		}
 
-		req, err := http.NewRequest("POST", batch.BackendURL, bytes.NewReader(batchBody))
+		req, err := http.NewRequestWithContext(ctx, "POST", batch.BackendURL, bytes.NewReader(batchBody))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create batch request: %w", err)
 		}
@@ -290,7 +377,7 @@ func (bp *BatchProcessor) sendBatch(batch *Batch, requests []BatchRequest) ([]Ba
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to send batch request: %w", err)
-			if isTransientError(err) {
+			if ctx.Err() == nil && isTransientError(err) {
 				continue
 			}
 			return nil, lastErr

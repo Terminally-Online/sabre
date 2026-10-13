@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -42,8 +43,8 @@ func TestNewBatchProcessor(t *testing.T) {
 		t.Errorf("expected empty batches map, got %d entries", len(bp.batches))
 	}
 
-	if cap(bp.workers) != 2 {
-		t.Errorf("expected workers channel capacity 2, got %d", cap(bp.workers))
+	if len(bp.workers) != 0 {
+		t.Errorf("expected no worker pools before any backend is used, got %d", len(bp.workers))
 	}
 }
 
@@ -58,7 +59,7 @@ func TestBatchProcessor_AddRequest(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req, nil)
+	responseChan, err := bp.AddRequest(context.Background(), backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -101,7 +102,7 @@ func TestBatchProcessor_MaxBatchSize(t *testing.T) {
 
 	for i := range 5 {
 		req.ID = json.RawMessage(fmt.Sprintf(`"%d"`, i))
-		responseChan, err := bp.AddRequest(backendURL, req, nil)
+		responseChan, err := bp.AddRequest(context.Background(), backendURL, req, nil)
 		if err != nil {
 			t.Errorf("expected no error adding request %d, got %v", i, err)
 		}
@@ -135,7 +136,7 @@ func TestBatchProcessor_MultipleBackends(t *testing.T) {
 
 	for i, url := range backendURLs {
 		req.ID = json.RawMessage(fmt.Sprintf(`"%d"`, i))
-		responseChan, err := bp.AddRequest(url, req, nil)
+		responseChan, err := bp.AddRequest(context.Background(), url, req, nil)
 		if err != nil {
 			t.Errorf("expected no error adding request to %s, got %v", url, err)
 		}
@@ -161,31 +162,35 @@ func TestBatchProcessor_MultipleBackends(t *testing.T) {
 func TestBatchProcessor_ConcurrentWorkers(t *testing.T) {
 	bp := NewBatchProcessor(5, 50*time.Millisecond, 2, 2, MulticallConfig{})
 
-	if cap(bp.workers) != 2 {
-		t.Errorf("expected worker pool capacity 2, got %d", cap(bp.workers))
+	if cap(bp.pool("a")) != 2 {
+		t.Errorf("expected worker pool capacity 2, got %d", cap(bp.pool("a")))
+	}
+	if bp.pool("a") == bp.pool("b") {
+		t.Error("expected each backend to own its worker pool")
 	}
 
 	bp2 := NewBatchProcessor(5, 50*time.Millisecond, 1, 2, MulticallConfig{})
 
-	if cap(bp2.workers) != 1 {
-		t.Errorf("expected worker pool capacity 1, got %d", cap(bp2.workers))
+	if cap(bp2.pool("a")) != 1 {
+		t.Errorf("expected worker pool capacity 1, got %d", cap(bp2.pool("a")))
 	}
 
 	bp3 := NewBatchProcessor(5, 10*time.Millisecond, 1, 2, MulticallConfig{})
 
-	if len(bp3.workers) != 0 {
-		t.Errorf("expected empty worker pool initially, got %d", len(bp3.workers))
+	workers := bp3.pool("a")
+	if len(workers) != 0 {
+		t.Errorf("expected empty worker pool initially, got %d", len(workers))
 	}
 
 	select {
-	case bp3.workers <- struct{}{}:
-		if len(bp3.workers) != 1 {
-			t.Errorf("expected 1 worker after acquisition, got %d", len(bp3.workers))
+	case workers <- struct{}{}:
+		if len(workers) != 1 {
+			t.Errorf("expected 1 worker after acquisition, got %d", len(workers))
 		}
 
-		<-bp3.workers
-		if len(bp3.workers) != 0 {
-			t.Errorf("expected 0 workers after release, got %d", len(bp3.workers))
+		<-workers
+		if len(workers) != 0 {
+			t.Errorf("expected 0 workers after release, got %d", len(workers))
 		}
 	default:
 		t.Error("expected to be able to acquire worker from pool")
@@ -203,7 +208,7 @@ func TestBatchProcessor_FlushAll(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req, nil)
+	responseChan, err := bp.AddRequest(context.Background(), backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -238,7 +243,7 @@ func TestBatchProcessor_ErrorHandling(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest("invalid-url", req, nil)
+	responseChan, err := bp.AddRequest(context.Background(), "invalid-url", req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -270,7 +275,7 @@ func TestBatchProcessor_TimeoutHandling(t *testing.T) {
 		Params:  json.RawMessage(`[]`),
 	}
 
-	responseChan, err := bp.AddRequest(backendURL, req, nil)
+	responseChan, err := bp.AddRequest(context.Background(), backendURL, req, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request, got %v", err)
 	}
@@ -309,12 +314,12 @@ func TestBatchProcessor_RequestMatching(t *testing.T) {
 		Params:  json.RawMessage(`["0x123", "latest"]`),
 	}
 
-	responseChan1, err := bp.AddRequest(backendURL, req1, nil)
+	responseChan1, err := bp.AddRequest(context.Background(), backendURL, req1, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request 1, got %v", err)
 	}
 
-	responseChan2, err := bp.AddRequest(backendURL, req2, nil)
+	responseChan2, err := bp.AddRequest(context.Background(), backendURL, req2, nil)
 	if err != nil {
 		t.Errorf("expected no error adding request 2, got %v", err)
 	}
@@ -365,37 +370,38 @@ func TestBatchProcessor_EmptyBatch(t *testing.T) {
 
 func TestBatchProcessor_WorkerReuse(t *testing.T) {
 	bp := NewBatchProcessor(1, 50*time.Millisecond, 1, 2, MulticallConfig{})
+	workers := bp.pool("a")
 
-	if len(bp.workers) != 0 {
-		t.Errorf("expected empty worker pool initially, got %d", len(bp.workers))
+	if len(workers) != 0 {
+		t.Errorf("expected empty worker pool initially, got %d", len(workers))
 	}
 
 	for i := range 3 {
 		select {
-		case bp.workers <- struct{}{}:
-			if len(bp.workers) != 1 {
-				t.Errorf("expected 1 worker after acquisition %d, got %d", i, len(bp.workers))
+		case workers <- struct{}{}:
+			if len(workers) != 1 {
+				t.Errorf("expected 1 worker after acquisition %d, got %d", i, len(workers))
 			}
 		default:
 			t.Errorf("expected to be able to acquire worker on iteration %d", i)
 		}
 
 		select {
-		case <-bp.workers:
-			if len(bp.workers) != 0 {
-				t.Errorf("expected 0 workers after release %d, got %d", i, len(bp.workers))
+		case <-workers:
+			if len(workers) != 0 {
+				t.Errorf("expected 0 workers after release %d, got %d", i, len(workers))
 			}
 		default:
 			t.Errorf("expected to be able to release worker on iteration %d", i)
 		}
 	}
 
-	if cap(bp.workers) != 1 {
-		t.Errorf("expected worker pool capacity 1, got %d", cap(bp.workers))
+	if cap(workers) != 1 {
+		t.Errorf("expected worker pool capacity 1, got %d", cap(workers))
 	}
 
-	if len(bp.workers) != 0 {
-		t.Errorf("expected empty worker pool at end, got %d", len(bp.workers))
+	if len(workers) != 0 {
+		t.Errorf("expected empty worker pool at end, got %d", len(workers))
 	}
 }
 
@@ -464,7 +470,7 @@ func TestBatchProcessor_DuplicateClientIDsNoCrossTalk(t *testing.T) {
 	params := make([]string, len(methods))
 	for i, m := range methods {
 		params[i] = fmt.Sprintf(`["req-%d"]`, i)
-		ch, err := bp.AddRequest("https://upstream.example", BatchRequest{
+		ch, err := bp.AddRequest(context.Background(), "https://upstream.example", BatchRequest{
 			JSONRPC: "2.0",
 			ID:      json.RawMessage(`1`),
 			Method:  m,
@@ -525,13 +531,13 @@ func TestBatchProcessor_MissingUpstreamResponse(t *testing.T) {
 		return jsonHTTPResponse(r, out), nil
 	})}
 
-	ch1, err := bp.AddRequest("https://upstream.example", BatchRequest{
+	ch1, err := bp.AddRequest(context.Background(), "https://upstream.example", BatchRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_call", Params: json.RawMessage(`["a"]`),
 	}, client)
 	if err != nil {
 		t.Fatalf("AddRequest: %v", err)
 	}
-	ch2, err := bp.AddRequest("https://upstream.example", BatchRequest{
+	ch2, err := bp.AddRequest(context.Background(), "https://upstream.example", BatchRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_getLogs", Params: json.RawMessage(`["b"]`),
 	}, client)
 	if err != nil {
@@ -608,7 +614,7 @@ func TestBatchProcessor_MulticallDuplicateClientIDs(t *testing.T) {
 	}
 	chans := make([]<-chan BatchResponse, len(reqs))
 	for i, req := range reqs {
-		ch, err := bp.AddRequest("https://upstream.example", req, client)
+		ch, err := bp.AddRequest(context.Background(), "https://upstream.example", req, client)
 		if err != nil {
 			t.Fatalf("AddRequest %d: %v", i, err)
 		}
@@ -667,7 +673,7 @@ func TestAccumulationDoesNotHoldAWorkerSlot(t *testing.T) {
 	chans := make([]<-chan BatchResponse, len(servers))
 	start := time.Now()
 	for i, s := range servers {
-		ch, err := bp.AddRequest(s.URL, req, s.Client())
+		ch, err := bp.AddRequest(context.Background(), s.URL, req, s.Client())
 		if err != nil {
 			t.Fatalf("backend %d: AddRequest: %v", i, err)
 		}
@@ -756,7 +762,7 @@ func BenchmarkBatchThroughput(b *testing.B) {
 					defer wg.Done()
 					for range work {
 						t0 := time.Now()
-						ch, err := bp.AddRequest(srv.URL, req, srv.Client())
+						ch, err := bp.AddRequest(context.Background(), srv.URL, req, srv.Client())
 						if err != nil {
 							b.Error(err)
 							return

@@ -568,6 +568,8 @@ func sendTo(ctx context.Context, bk *backend.Backend, inHdr http.Header, body []
 }
 
 func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Backend, isBatch bool, req rpcReq, reqs []rpcReq, timeout time.Duration, r *http.Request, body []byte) (status int, hdrs http.Header, data []byte, err error) {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
 	if isBatch {
 		responseChans := make([]<-chan backend.BatchResponse, len(reqs))
 		for i, reqItem := range reqs {
@@ -577,20 +579,18 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 				Method:  reqItem.Method,
 				Params:  reqItem.Params,
 			}
-			responseChans[i], err = batchProcessor.AddRequest(bk.URL.String(), batchReq, bk.Client)
+			responseChans[i], err = batchProcessor.AddRequest(ctx, bk.URL.String(), batchReq, bk.Client)
 			if err != nil {
 				return sendTo(r.Context(), bk, r.Header, body)
 			}
 		}
 
 		responses := make([]backend.BatchResponse, len(reqs))
-		deadline := time.NewTimer(timeout)
-		defer deadline.Stop()
 		for i, ch := range responseChans {
 			select {
 			case resp := <-ch:
 				responses[i] = resp
-			case <-deadline.C:
+			case <-ctx.Done():
 				return 0, nil, nil, fmt.Errorf("batch request timeout")
 			}
 		}
@@ -624,7 +624,7 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 			Method:  req.Method,
 			Params:  req.Params,
 		}
-		responseChan, err := batchProcessor.AddRequest(bk.URL.String(), batchReq, bk.Client)
+		responseChan, err := batchProcessor.AddRequest(ctx, bk.URL.String(), batchReq, bk.Client)
 		if err != nil {
 			return sendTo(r.Context(), bk, r.Header, body)
 		}
@@ -641,7 +641,7 @@ func processBatchRequest(batchProcessor *backend.BatchProcessor, bk *backend.Bac
 			hdrs = make(http.Header)
 			hdrs.Set("Content-Type", "application/json")
 			return http.StatusOK, hdrs, data, nil
-		case <-time.After(timeout):
+		case <-ctx.Done():
 			return 0, nil, nil, fmt.Errorf("batch request timeout")
 		}
 	}
