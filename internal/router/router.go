@@ -343,7 +343,8 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
 									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config())
 									if ttl > 0 {
-										cstore.Put(key, respBytes, ttl, chain, blockNum, blockHash)
+										readNum, readHash := backend.ResponseBlock(respBytes)
+										cstore.Put(key, respBytes, ttl, chain, readNum, readHash)
 									}
 								}
 							}

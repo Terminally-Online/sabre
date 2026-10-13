@@ -232,7 +232,7 @@ func (s *Store) Get(key string) ([]byte, bool) {
 // Put stores a value in the cache with the specified TTL and chain ID.
 // If callBlockNum/callBlockHash are non-zero, they identify the block the
 // response data is about (extracted from the response body via
-// ExtractBlockInfo). When the caller's block is past the chain's reorg depth behind
+// ResponseBlock). When the caller's block is past the chain's reorg depth behind
 // the chain tip, the entry is immutable and stored with an effectively
 // infinite expiry — no point re-fetching historical data that cannot
 // change. Callers that don't have block info (non-block-scoped methods)
@@ -466,7 +466,7 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 		return
 	}
 	key, _ := CanonicalKey(chain, method, params)
-	blockNum, blockHash := ExtractBlockInfo(response)
+	blockNum, blockHash := ResponseBlock(response)
 	s.Put(key, response, ttl, chain, blockNum, blockHash)
 }
 
@@ -866,6 +866,48 @@ func ExtractBlockInfo(response []byte) (blockNum uint64, blockHash string) {
 	}
 
 	return blockNum, blockHash
+}
+
+// ResponseBlock names the block a response's result was read from: a block's
+// own number and hash, the block a transaction or receipt was included in, or
+// the newest block among a log list's entries, which descends from every other
+// block in the list. A result that names no block yields 0 and "".
+func ResponseBlock(response []byte) (blockNum uint64, blockHash string) {
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(response, &resp); err != nil {
+		return 0, ""
+	}
+
+	type included struct {
+		Number      json.RawMessage `json:"number"`
+		Hash        string          `json:"hash"`
+		BlockNumber json.RawMessage `json:"blockNumber"`
+		BlockHash   string          `json:"blockHash"`
+	}
+
+	var logs []included
+	if err := json.Unmarshal(resp.Result, &logs); err == nil {
+		for _, l := range logs {
+			if n := quantityFromRaw(l.BlockNumber); n > blockNum && l.BlockHash != "" {
+				blockNum, blockHash = n, l.BlockHash
+			}
+		}
+		return blockNum, blockHash
+	}
+
+	var obj included
+	if err := json.Unmarshal(resp.Result, &obj); err != nil {
+		return 0, ""
+	}
+	if n := quantityFromRaw(obj.BlockNumber); n > 0 && obj.BlockHash != "" {
+		return n, obj.BlockHash
+	}
+	if n := quantityFromRaw(obj.Number); n > 0 && obj.Hash != "" {
+		return n, obj.Hash
+	}
+	return 0, ""
 }
 
 func extractParentHashFromBlockData(blockData []byte) string {

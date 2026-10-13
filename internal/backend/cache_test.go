@@ -1182,3 +1182,43 @@ func TestStore_NullResultIsNotCached(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_ResponsesAreStampedWithTheirOwnBlock(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	cfg.Chains["8453"] = ChainCacheConfig{MaxReorgDepth: 1800}
+	defer cleanupTestCache(t, cfg)
+
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hash := `"0x00000000000000000000000000000000000000000000000000000000000000aa"`
+	included := `"blockNumber":"0x3e9","blockHash":"0x00000000000000000000000000000000000000000000000000000000000003e9"`
+	tests := []struct {
+		method string
+		params string
+		result string
+	}{
+		{"eth_getTransactionReceipt", `[` + hash + `]`, `{"transactionHash":` + hash + `,` + included + `,"status":"0x1"}`},
+		{"eth_getTransactionByHash", `[` + hash + `]`, `{"hash":` + hash + `,` + included + `}`},
+		{"eth_getLogs", `[{"fromBlock":"0x3e8","toBlock":"0x3e9"}]`, `[{"blockNumber":"0x3e8","blockHash":"0x00000000000000000000000000000000000000000000000000000000000003e8"},{` + included + `}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			// The tip sabre last probed trails the block the response was read
+			// from, which on a two-second chain is the common case.
+			store.UpdateLatestBlock("8453", 1000, "0x00000000000000000000000000000000000000000000000000000000000003e8", nil)
+
+			params := json.RawMessage(tt.params)
+			store.Store("8453", tt.method, params, []byte(`{"jsonrpc":"2.0","id":1,"result":`+tt.result+`}`))
+
+			store.UpdateLatestBlock("8453", 1001, "0x00000000000000000000000000000000000000000000000000000000000003ea", nil)
+
+			if body, ok := store.Lookup("8453", tt.method, params, json.RawMessage(`2`)); ok {
+				t.Errorf("a %s from a block the chain reorganized away was served: %s", tt.method, body)
+			}
+		})
+	}
+}
