@@ -444,8 +444,7 @@ func RewriteResponseID(response []byte, id json.RawMessage) []byte {
 }
 
 // Store caches an upstream response: the immutable sub-calls of a multicall, or
-// a normal keyed entry whose TTL follows the method and block tag. Only a
-// response that answers with a value is kept; see Cacheable.
+// a normal keyed entry whose TTL is the answer's own; see AnswerTTL.
 func (s *Store) Store(chain, method string, params json.RawMessage, response []byte) {
 	if !s.cfg.Enabled {
 		return
@@ -458,15 +457,11 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 		s.cacheImmutableCall(chain, target, callData, response)
 		return
 	}
-	if !Cacheable(response) {
-		return
-	}
-	ttl := TTL(method, params, s.cfg)
+	ttl, blockNum, blockHash := AnswerTTL(method, params, response, s.cfg)
 	if ttl <= 0 {
 		return
 	}
 	key, _ := CanonicalKey(chain, method, params)
-	blockNum, blockHash := ResponseBlock(response)
 	s.Put(key, response, ttl, chain, blockNum, blockHash)
 }
 
@@ -743,7 +738,7 @@ func CanonicalKey(chainID, method string, params json.RawMessage) (string, error
 		min, _ := json.Marshal(anyParams)
 		h.Write(min)
 	}
-	return fmt.Sprintf("v2:%x", h.Sum(nil)), nil
+	return fmt.Sprintf("v3:%x", h.Sum(nil)), nil
 }
 
 // TTL determines the appropriate time-to-live for caching a specific RPC method.
@@ -759,11 +754,12 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig) time.Duration {
 		}
 		return cfg.TTLLatest
 	case "eth_getBlockByHash", "eth_getTransactionByHash", "eth_getTransactionReceipt":
-		// Hash-addressed: the hash IS the content identity, so the
-		// response is effectively immutable (modulo reorgs that
-		// invalidate the containing block, which the entry's block
-		// info + reorg detection handle). Use TTLBlock, same as
-		// block-number-scoped eth_call/eth_getBalance/etc.
+		// Hash-addressed: the hash IS the content identity, so once the
+		// answer names the block it was included in it is effectively
+		// immutable (modulo reorgs that invalidate the containing block,
+		// which the entry's block info + reorg detection handle). Use
+		// TTLBlock, same as block-number-scoped eth_call/eth_getBalance/etc.
+		// An answer that names no block yet is refused by AnswerTTL.
 		return cfg.TTLBlock
 	case "eth_getLogs":
 		if logsPinned(params) {
@@ -775,6 +771,35 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig) time.Duration {
 		//       estimateGas, fee data, pending, subscriptions, etc.
 		return 0
 	}
+}
+
+// AnswerTTL is how long an upstream answer to a request may be served from
+// cache, with the block the answer was read from for reorg tracking. A zero
+// TTL means the answer is not kept. The request decides the TTL a final answer
+// earns (see TTL); the answer decides whether it is final. An error or a null
+// result is not (see Cacheable), and neither is a transaction or receipt that
+// names no including block: it is the mempool's view at the moment of asking,
+// and the same request answers with the including block once it is mined.
+func AnswerTTL(method string, params json.RawMessage, response []byte, cfg CacheConfig) (ttl time.Duration, blockNum uint64, blockHash string) {
+	if !Cacheable(response) {
+		return 0, 0, ""
+	}
+	ttl = TTL(method, params, cfg)
+	if ttl <= 0 {
+		return 0, 0, ""
+	}
+	blockNum, blockHash = ResponseBlock(response)
+	if answersWithInclusion[method] && blockNum == 0 {
+		return 0, 0, ""
+	}
+	return ttl, blockNum, blockHash
+}
+
+// answersWithInclusion holds the methods whose answer is final only once it
+// names the block that includes the transaction asked about.
+var answersWithInclusion = map[string]bool{
+	"eth_getTransactionByHash":  true,
+	"eth_getTransactionReceipt": true,
 }
 
 // pinnedToBlock reports whether the request's block parameter, at the

@@ -1869,3 +1869,85 @@ func TestRouter_BatchNullResultIsNotCached(t *testing.T) {
 		}
 	}
 }
+
+// TestRouter_BatchPendingTransactionIsNotCached covers a transaction asked for
+// while it is still in the mempool: the answer carries no block, and once the
+// transaction is mined the caller must see the block that includes it.
+func TestRouter_BatchPendingTransactionIsNotCached(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	var hits atomic.Int64
+	bk := backend.CreateMockBackend("node", "ethereum", "https://node.example.com")
+	bk.HealthUp.Store(true)
+	bk.Client = &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		mined := hits.Add(1) > 1
+		var batch []struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			return nil, err
+		}
+		resps := make([]json.RawMessage, len(batch))
+		for i, m := range batch {
+			result := `{"hash":"0xaa","blockNumber":null,"blockHash":null,"transactionIndex":null}`
+			if mined {
+				result = `{"hash":"0xaa","blockNumber":"0x10","blockHash":"0x0000000000000000000000000000000000000000000000000000000000000010","transactionIndex":"0x0"}`
+			}
+			resps[i] = json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, m.ID, result))
+		}
+		out, _ := json.Marshal(resps)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+			Request:    r,
+		}, nil
+	})}
+	cfg.Backends = []*backend.Backend{bk}
+	cfg.BackendsCt = map[string]int{"ethereum": 1}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	body, _ := json.Marshal([]map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionByHash", "params": []any{"0x00000000000000000000000000000000000000000000000000000000000000aa"}},
+		{"jsonrpc": "2.0", "id": 2, "method": "eth_getTransactionByHash", "params": []any{"0x00000000000000000000000000000000000000000000000000000000000000bb"}},
+	})
+	send := func() []struct {
+		Result struct {
+			BlockNumber *string `json:"blockNumber"`
+		} `json:"result"`
+	} {
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch: status = %d, want 200. body: %s", w.Code, w.Body.String())
+		}
+		var out []struct {
+			Result struct {
+				BlockNumber *string `json:"blockNumber"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("Unmarshal(%s) error = %v", w.Body.String(), err)
+		}
+		return out
+	}
+
+	send()
+	second := send()
+	if hits.Load() != 2 {
+		t.Errorf("upstream reached %d times, want 2: the pending transactions were served from cache", hits.Load())
+	}
+	for i, r := range second {
+		if r.Result.BlockNumber == nil {
+			t.Errorf("item %d: mined transaction answered as pending", i)
+		}
+	}
+}

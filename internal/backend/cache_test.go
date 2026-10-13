@@ -1222,3 +1222,74 @@ func TestStore_ResponsesAreStampedWithTheirOwnBlock(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_PendingTransactionIsNotCached(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hash := `"0x00000000000000000000000000000000000000000000000000000000000000aa"`
+	tests := []struct {
+		method string
+		result string
+	}{
+		{"eth_getTransactionByHash", `{"hash":` + hash + `,"blockNumber":null,"blockHash":null,"transactionIndex":null,"nonce":"0x1"}`},
+		{"eth_getTransactionByHash", `{"hash":` + hash + `,"nonce":"0x1"}`},
+		{"eth_getTransactionReceipt", `{"transactionHash":` + hash + `,"blockNumber":null,"blockHash":null,"status":"0x1"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			store.UpdateLatestBlock("8453", 1000, "0x00000000000000000000000000000000000000000000000000000000000003e8", nil)
+
+			params := json.RawMessage(`[` + hash + `]`)
+			store.Store("8453", tt.method, params, []byte(`{"jsonrpc":"2.0","id":1,"result":`+tt.result+`}`))
+
+			if body, ok := store.Lookup("8453", tt.method, params, json.RawMessage(`2`)); ok {
+				t.Errorf("a %s not yet included in a block was served from cache: %s", tt.method, body)
+			}
+		})
+	}
+}
+
+func TestAnswerTTL(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	hash := `"0x00000000000000000000000000000000000000000000000000000000000000aa"`
+	included := `"blockNumber":"0x3e9","blockHash":"0x00000000000000000000000000000000000000000000000000000000000003e9"`
+	pending := `"blockNumber":null,"blockHash":null`
+	tests := []struct {
+		name     string
+		method   string
+		params   string
+		result   string
+		ttl      time.Duration
+		blockNum uint64
+	}{
+		{"mined transaction", "eth_getTransactionByHash", `[` + hash + `]`, `{"hash":` + hash + `,` + included + `}`, cfg.TTLBlock, 1001},
+		{"pending transaction", "eth_getTransactionByHash", `[` + hash + `]`, `{"hash":` + hash + `,` + pending + `}`, 0, 0},
+		{"mined receipt", "eth_getTransactionReceipt", `[` + hash + `]`, `{"transactionHash":` + hash + `,` + included + `}`, cfg.TTLBlock, 1001},
+		{"pending receipt", "eth_getTransactionReceipt", `[` + hash + `]`, `{"transactionHash":` + hash + `,` + pending + `}`, 0, 0},
+		{"unknown transaction", "eth_getTransactionByHash", `[` + hash + `]`, `null`, 0, 0},
+		{"block by hash", "eth_getBlockByHash", `[` + hash + `,false]`, `{"number":"0x3e9","hash":` + hash + `}`, cfg.TTLBlock, 1001},
+		{"pinned call", "eth_call", `[{"to":"0x0000000000000000000000000000000000000001","data":"0x"},"0x3e9"]`, `"0x01"`, cfg.TTLBlock, 0},
+		{"pinned empty logs", "eth_getLogs", `[{"fromBlock":"0x3e8","toBlock":"0x3e9"}]`, `[]`, cfg.TTLBlock, 0},
+		{"latest call", "eth_call", `[{"to":"0x0000000000000000000000000000000000000001","data":"0x"},"latest"]`, `"0x01"`, cfg.TTLLatest, 0},
+		{"uncached method", "eth_sendRawTransaction", `["0x00"]`, `"0x01"`, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := []byte(`{"jsonrpc":"2.0","id":1,"result":` + tt.result + `}`)
+			ttl, blockNum, _ := AnswerTTL(tt.method, json.RawMessage(tt.params), response, cfg)
+			if ttl != tt.ttl {
+				t.Errorf("ttl = %v, want %v", ttl, tt.ttl)
+			}
+			if blockNum != tt.blockNum {
+				t.Errorf("block = %d, want %d", blockNum, tt.blockNum)
+			}
+		})
+	}
+}
