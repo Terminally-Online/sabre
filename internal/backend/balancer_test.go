@@ -559,6 +559,9 @@ passes_to_up = 2
 enabled = true
 path = %q
 
+[cache.chains.1]
+max_reorg_depth = 100
+
 [node.1]
 url = %q
 `, ttlCheckMs, timeoutMs, filepath.Join(dir, "cache"), upstream)

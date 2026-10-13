@@ -18,22 +18,22 @@ import (
 
 // CacheConfig holds configuration for the cache store.
 type CacheConfig struct {
-	Enabled       bool          `toml:"enabled"`
-	Path          string        `toml:"path"`
-	MemEntries    int           `toml:"mem_entries"`
-	TTLLatest     time.Duration `toml:"ttl_latest_ms"`
-	TTLBlock      time.Duration `toml:"ttl_block_ms"`
-	Clean         bool          `toml:"clean"`
-	MaxReorgDepth int           `toml:"max_reorg_depth"`
+	Enabled    bool          `toml:"enabled"`
+	Path       string        `toml:"path"`
+	MemEntries int           `toml:"mem_entries"`
+	TTLLatest  time.Duration `toml:"ttl_latest_ms"`
+	TTLBlock   time.Duration `toml:"ttl_block_ms"`
+	Clean      bool          `toml:"clean"`
 
 	// BlockCacheBytes is how much memory the on-disk tier keeps for decompressed
 	// table blocks. Pebble's own default is small enough that a working set of
 	// any size reads from disk on nearly every lookup.
 	BlockCacheBytes int64 `toml:"block_cache_bytes"`
 
-	// Chains overrides settings for one chain, keyed by the same chain name
-	// the backends are configured under. A reorg depth counted in blocks is a
-	// wall-clock window that differs with each chain's block time.
+	// Chains holds the settings that belong to one chain, keyed by the same
+	// chain name the backends are configured under. A reorg depth counted in
+	// blocks is a wall-clock window that differs with each chain's block time,
+	// so no chain borrows another's.
 	Chains map[string]ChainCacheConfig `toml:"chains"`
 }
 
@@ -51,13 +51,9 @@ func (c CacheConfig) BlockTime(chainID string) time.Duration {
 }
 
 // ReorgDepth is the depth, in blocks behind the chain's tip, past which the
-// chain's data is treated as immutable: the chain's own max_reorg_depth when
-// it declares one, else the global MaxReorgDepth.
+// chain's data is treated as immutable: the chain's own max_reorg_depth.
 func (c CacheConfig) ReorgDepth(chainID string) uint64 {
-	if chain, ok := c.Chains[chainID]; ok && chain.MaxReorgDepth > 0 {
-		return uint64(chain.MaxReorgDepth)
-	}
-	return uint64(c.MaxReorgDepth)
+	return uint64(max(c.Chains[chainID].MaxReorgDepth, 0))
 }
 
 // Store provides persistent caching with TTL support and block hash validation.
@@ -334,9 +330,6 @@ func Open(cfg CacheConfig) (*Store, error) {
 		cfg.TTLBlock = 24 * time.Hour
 	}
 
-	if cfg.MaxReorgDepth <= 0 {
-		cfg.MaxReorgDepth = 100
-	}
 	if cfg.BlockCacheBytes <= 0 {
 		cfg.BlockCacheBytes = 512 << 20
 	}

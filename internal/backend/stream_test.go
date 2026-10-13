@@ -39,8 +39,7 @@ func createTestStreamConfig() Config {
 			MaxMessageSize:                1048576,
 		},
 		Cache: CacheConfig{
-			MaxReorgDepth: 100,
-			Chains:        map[string]ChainCacheConfig{"ethereum": {BlockTime: 12 * time.Second}},
+			Chains: map[string]ChainCacheConfig{"ethereum": {BlockTime: 12 * time.Second, MaxReorgDepth: 100}},
 		},
 		Backends: []*Backend{backend},
 	}
@@ -1297,6 +1296,7 @@ func TestStream_ReorgAtTheSameHeightIsDelivered(t *testing.T) {
 	cfg := parseStreamConfig(t, `
 [cache.chains.8453]
 block_time_ms = 2000
+max_reorg_depth = 600
 
 [node.8453]
 url = "http://127.0.0.1:1"
@@ -1344,6 +1344,7 @@ func TestStream_StalenessFollowsTheChainBlockTime(t *testing.T) {
 	cfg := parseStreamConfig(t, fmt.Sprintf(`
 [cache.chains.8453]
 block_time_ms = 2000
+max_reorg_depth = 600
 
 [stale.8453]
 url = "http://127.0.0.1:1"

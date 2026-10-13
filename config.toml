@@ -264,21 +264,6 @@ path = "./.data/sabre"
 # which can be beneficial for production environments where you want to maintain
 # cache performance and reduce initial load times.
 clean = false
-# Maximum depth of re-orgs to protect against (in blocks).
-# This determines:
-# 1. How many recent block hashes to keep in memory for comparison
-# 2. How far back to validate cached data against known block hashes
-# 3. The threshold for considering blocks "stable" vs "recent"
-# A value of 100 means we'll track the last 100 blocks and be conservative
-# with data from recent blocks. Higher values provide better protection
-# but use more memory and may reduce cache effectiveness.
-#
-# A depth in blocks is a window in time that depends on the chain's block
-# time: 100 blocks is twenty minutes of Ethereum mainnet, past finality, but
-# only two hundred seconds of a two-second chain. Any chain can declare its
-# own depth under [cache.chains.<chain>], keyed by the same chain name its
-# backends use; chains that don't fall back to this value.
-max_reorg_depth = 100
 # How much memory the on-disk tier keeps for decompressed table blocks. Pebble's
 # own default is small enough that a working set of any size reads from disk on
 # nearly every lookup, and against a colocated node answering in a fraction of a
@@ -308,8 +293,20 @@ ttl_block_ms = 86400000
 # is treated as stalled once two of its chain's block times pass without one.
 # A chain served over websockets must declare it; sabre refuses to start
 # without it rather than assume another chain's clock.
+#
+# Every chain also declares max_reorg_depth: how many blocks below its tip a
+# block can still be reorganized. It determines:
+# 1. How many recent block hashes to keep in memory for comparison
+# 2. How far back to validate cached data against known block hashes
+# 3. The threshold for considering blocks "stable" vs "recent"
+# A depth in blocks is a window in time that depends on the chain's block
+# time, so no chain inherits another's: a chain that is cached or streamed
+# must declare its own, and sabre refuses to start without it.
+#
+# 100 blocks is twenty minutes of Ethereum mainnet, past finality.
 [cache.chains.1]
 block_time_ms = 12000
+max_reorg_depth = 100
 
 # Base produces a block every two seconds and finalizes once its batches do on
 # Ethereum, so the twenty minutes mainnet gets from 100 blocks is 600 here.

@@ -31,13 +31,16 @@ func getUniqueTestCachePath(t *testing.T) string {
 
 func createUniqueTestCacheConfig(t *testing.T) CacheConfig {
 	return CacheConfig{
-		Enabled:       true,
-		Path:          getUniqueTestCachePath(t),
-		MemEntries:    1000,
-		TTLLatest:     250 * time.Millisecond,
-		TTLBlock:      24 * time.Hour,
-		Clean:         true,
-		MaxReorgDepth: 100,
+		Enabled:    true,
+		Path:       getUniqueTestCachePath(t),
+		MemEntries: 1000,
+		TTLLatest:  250 * time.Millisecond,
+		TTLBlock:   24 * time.Hour,
+		Clean:      true,
+		Chains: map[string]ChainCacheConfig{
+			"ethereum": {MaxReorgDepth: 100},
+			"1":        {MaxReorgDepth: 100},
+		},
 	}
 }
 
@@ -327,7 +330,7 @@ func TestStore_BlockHashValidationEdgeCases(t *testing.T) {
 
 func TestStore_CleanupOldBlockHashes(t *testing.T) {
 	cfg := createUniqueTestCacheConfig(t)
-	cfg.MaxReorgDepth = 5
+	cfg.Chains["ethereum"] = ChainCacheConfig{MaxReorgDepth: 5}
 	defer cleanupTestCache(t, cfg)
 
 	store, err := Open(cfg)
@@ -1062,7 +1065,7 @@ func TestStore_ReorgPurgesOnlyItsOwnChain(t *testing.T) {
 
 func TestStore_ReorgDepthIsPerChain(t *testing.T) {
 	cfg := createUniqueTestCacheConfig(t)
-	cfg.Chains = map[string]ChainCacheConfig{"8453": {MaxReorgDepth: 600}}
+	cfg.Chains["8453"] = ChainCacheConfig{MaxReorgDepth: 600}
 	defer cleanupTestCache(t, cfg)
 	store, err := Open(cfg)
 	if err != nil {

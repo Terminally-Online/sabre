@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,11 +57,11 @@ path = "./.data/sabre"
 mem_entries = 100000
 ttl_latest_ms = 250
 ttl_block_ms = 86400000
-max_reorg_depth = 100
 clean = true
 
 [cache.chains.1]
 block_time_ms = 12000
+max_reorg_depth = 100
 
 [reth.1]
 url = "https://api.example.com"
@@ -192,8 +193,8 @@ ws_url = "wss://api.example.com"
 		t.Errorf("expected default TTL block 86400000ms, got %v", cfg.Cache.TTLBlock)
 	}
 
-	if cfg.Cache.MaxReorgDepth != 100 {
-		t.Errorf("expected default max reorg depth 100, got %d", cfg.Cache.MaxReorgDepth)
+	if got := cfg.Cache.ReorgDepth("1"); got != 100 {
+		t.Errorf("expected chain 1's max reorg depth 100, got %d", got)
 	}
 }
 
@@ -245,11 +246,11 @@ path = "/tmp/sabre_cache"
 mem_entries = 50000
 ttl_latest_ms = 500
 ttl_block_ms = 172800000
-max_reorg_depth = 200
 clean = true
 
 [cache.chains.1]
 block_time_ms = 12000
+max_reorg_depth = 200
 
 [reth.1]
 url = "https://api.example.com"
@@ -405,8 +406,8 @@ ws_url = "wss://api.example.com"
 		t.Errorf("expected custom TTL block 172800000ms, got %v", cfg.Cache.TTLBlock)
 	}
 
-	if cfg.Cache.MaxReorgDepth != 200 {
-		t.Errorf("expected custom max reorg depth 200, got %d", cfg.Cache.MaxReorgDepth)
+	if got := cfg.Cache.ReorgDepth("1"); got != 200 {
+		t.Errorf("expected chain 1's custom max reorg depth 200, got %d", got)
 	}
 
 	if !cfg.Cache.Clean {
@@ -426,6 +427,7 @@ ethereum = { url = "https://eth-mainnet.alchemyapi.io/v2/KEY", ws_url = "wss://e
 
 [cache.chains.ethereum]
 block_time_ms = 12000
+max_reorg_depth = 100
 `
 
 	tmpDir := t.TempDir()
@@ -512,12 +514,15 @@ ethereum = { url = "https://api.example.com/CHAIN_NAME", ws_url = "wss://api.exa
 
 [cache.chains.ethereum]
 block_time_ms = 12000
+max_reorg_depth = 100
 
 [cache.chains.polygon]
 block_time_ms = 2000
+max_reorg_depth = 100
 
 [cache.chains.arbitrum]
 block_time_ms = 250
+max_reorg_depth = 100
 `
 
 	tmpDir := t.TempDir()
@@ -599,6 +604,7 @@ ethereum = { url = "${API_URL}/v1/${API_KEY}", ws_url = "${WS_URL}/v1/${API_KEY}
 
 [cache.chains.ethereum]
 block_time_ms = 12000
+max_reorg_depth = 100
 `
 
 	tmpDir := t.TempDir()
@@ -766,6 +772,9 @@ enabled = true
 path = "` + cachePath + `"
 clean = true
 
+[cache.chains.ethereum]
+max_reorg_depth = 100
+
 [reth]
 ethereum = { url = "https://api.example.com" }
 `
@@ -851,6 +860,8 @@ func TestParseConfig_PerChainReorgDepth(t *testing.T) {
 [cache]
 enabled = true
 path = "` + "PATH" + `"
+
+[cache.chains.1]
 max_reorg_depth = 100
 
 [cache.chains.8453]
@@ -872,7 +883,7 @@ url = "https://base.example.com"
 	cfg := ParseConfig(configPath)
 
 	if got := cfg.Cache.ReorgDepth("1"); got != 100 {
-		t.Errorf("ReorgDepth(1) = %d, want the global 100", got)
+		t.Errorf("ReorgDepth(1) = %d, want 100", got)
 	}
 	if got := cfg.Cache.ReorgDepth("8453"); got != 600 {
 		t.Errorf("ReorgDepth(8453) = %d, want 600", got)
@@ -887,9 +898,13 @@ path = "` + "PATH" + `"
 
 [cache.chains.1]
 block_time_ms = 12000
+max_reorg_depth = 100
 
 [cache.chains.8453]
 block_time_ms = 2000
+max_reorg_depth = 600
+
+[cache.chains.10]
 max_reorg_depth = 600
 
 [reth.1]
@@ -923,5 +938,61 @@ url = "https://op.example.com"
 	}
 	if got := cfg.Cache.BlockTime("10"); got != 0 {
 		t.Errorf("BlockTime(10) = %v, want none declared", got)
+	}
+}
+
+func TestParseConfig_ChainWithoutItsOwnReorgDepthIsRefused(t *testing.T) {
+	for name, configContent := range map[string]string{
+		"a cached chain": `
+[cache]
+enabled = true
+path = "PATH"
+max_reorg_depth = 100
+
+[cache.chains.1]
+max_reorg_depth = 100
+
+[reth.1]
+url = "https://eth.example.com"
+
+[reth.8453]
+url = "https://base.example.com"
+`,
+		"a streamed chain": `
+[cache]
+enabled = false
+path = "PATH"
+
+[cache.chains.1]
+block_time_ms = 12000
+max_reorg_depth = 100
+
+[cache.chains.8453]
+block_time_ms = 2000
+
+[reth.1]
+url = "https://eth.example.com"
+ws_url = "wss://eth.example.com"
+
+[reth.8453]
+url = "https://base.example.com"
+ws_url = "wss://base.example.com"
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.toml")
+			content := strings.Replace(configContent, "PATH", filepath.Join(tmpDir, "cache"), 1)
+			if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+			defer func() {
+				r := recover()
+				if r == nil || !strings.Contains(fmt.Sprint(r), "8453") {
+					t.Errorf("Base declared no max_reorg_depth and parsing answered %v; want a refusal naming the chain", r)
+				}
+			}()
+			ParseConfig(configPath)
+		})
 	}
 }

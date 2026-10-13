@@ -74,7 +74,8 @@ func benchRouter(b *testing.B, batchEnabled bool) (*http.Server, func()) {
 	storeCfg := backend.CacheConfig{
 		Enabled: false, Path: filepath.Join(getTestCachePath(), b.Name()),
 		MemEntries: 1000, TTLLatest: 250 * time.Millisecond,
-		TTLBlock: 24 * time.Hour, Clean: true, MaxReorgDepth: 100,
+		TTLBlock: 24 * time.Hour, Clean: true,
+		Chains: map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}},
 	}
 	store, err := backend.Open(storeCfg)
 	if err != nil {

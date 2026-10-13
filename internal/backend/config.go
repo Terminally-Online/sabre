@@ -378,9 +378,6 @@ func ParseConfig(path string) Config {
 			cc.TTLBlock = cc.TTLBlock * time.Millisecond
 		}
 
-		if cc.MaxReorgDepth <= 0 {
-			cc.MaxReorgDepth = 100
-		}
 		for chain, chainCfg := range cc.Chains {
 			chainCfg.BlockTime = chainCfg.BlockTime * time.Millisecond
 			cc.Chains[chain] = chainCfg
@@ -403,13 +400,12 @@ func ParseConfig(path string) Config {
 		cfg.Cache = cc
 	} else {
 		cfg.Cache = CacheConfig{
-			Enabled:       false,
-			Path:          "./.data/sabre",
-			MemEntries:    100_000,
-			TTLLatest:     250 * time.Millisecond,
-			TTLBlock:      86_400_000 * time.Millisecond,
-			Clean:         false,
-			MaxReorgDepth: 100,
+			Enabled:    false,
+			Path:       "./.data/sabre",
+			MemEntries: 100_000,
+			TTLLatest:  250 * time.Millisecond,
+			TTLBlock:   86_400_000 * time.Millisecond,
+			Clean:      false,
 		}
 	}
 
@@ -529,11 +525,16 @@ func ParseConfig(path string) Config {
 
 	hasWebSocket := false
 	for i := range cfg.Backends {
-		if cfg.Backends[i].WSURL == nil {
+		chain := cfg.Backends[i].Chain
+		streamed := cfg.Backends[i].WSURL != nil
+		if (cfg.Cache.Enabled || streamed) && cfg.Cache.ReorgDepth(chain) == 0 {
+			panic(fmt.Sprintf("chain %s declares no reorg depth: set max_reorg_depth under [cache.chains.%s]", chain, chain))
+		}
+		if !streamed {
 			continue
 		}
 		hasWebSocket = true
-		if chain := cfg.Backends[i].Chain; cfg.Cache.BlockTime(chain) <= 0 {
+		if cfg.Cache.BlockTime(chain) <= 0 {
 			panic(fmt.Sprintf("chain %s has a websocket backend but no block time: set block_time_ms under [cache.chains.%s]", chain, chain))
 		}
 	}

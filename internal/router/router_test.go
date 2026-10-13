@@ -82,13 +82,13 @@ func createTestConfig() backend.Config {
 		},
 		BatchProcessor: nil,
 		Cache: backend.CacheConfig{
-			Enabled:       true,
-			Path:          getTestCachePath(),
-			MemEntries:    1000,
-			TTLLatest:     250 * time.Millisecond,
-			TTLBlock:      24 * time.Hour,
-			Clean:         true,
-			MaxReorgDepth: 100,
+			Enabled:    true,
+			Path:       getTestCachePath(),
+			MemEntries: 1000,
+			TTLLatest:  250 * time.Millisecond,
+			TTLBlock:   24 * time.Hour,
+			Clean:      true,
+			Chains:     map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}, "base": {MaxReorgDepth: 600}, "polygon": {MaxReorgDepth: 100}},
 		},
 		Backends: func() []*backend.Backend {
 			backend1 := backend.CreateMockBackend("test-backend-1", "ethereum", "https://api1.example.com")
@@ -108,13 +108,13 @@ func createTestConfig() backend.Config {
 
 func createTestStore(t *testing.T) *backend.Store {
 	cfg := backend.CacheConfig{
-		Enabled:       true,
-		Path:          getUniqueTestCachePath(t),
-		MemEntries:    1000,
-		TTLLatest:     250 * time.Millisecond,
-		TTLBlock:      24 * time.Hour,
-		Clean:         true,
-		MaxReorgDepth: 100,
+		Enabled:    true,
+		Path:       getUniqueTestCachePath(t),
+		MemEntries: 1000,
+		TTLLatest:  250 * time.Millisecond,
+		TTLBlock:   24 * time.Hour,
+		Clean:      true,
+		Chains:     map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}, "base": {MaxReorgDepth: 600}, "polygon": {MaxReorgDepth: 100}},
 	}
 
 	store, err := backend.Open(cfg)
@@ -274,13 +274,13 @@ func TestRouter_ValidJSONRPCRequest(t *testing.T) {
 	cfg.Cache.Enabled = false
 
 	storeCfg := backend.CacheConfig{
-		Enabled:       false,
-		Path:          getUniqueTestCachePath(t),
-		MemEntries:    1000,
-		TTLLatest:     250 * time.Millisecond,
-		TTLBlock:      24 * time.Hour,
-		Clean:         true,
-		MaxReorgDepth: 100,
+		Enabled:    false,
+		Path:       getUniqueTestCachePath(t),
+		MemEntries: 1000,
+		TTLLatest:  250 * time.Millisecond,
+		TTLBlock:   24 * time.Hour,
+		Clean:      true,
+		Chains:     map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}, "base": {MaxReorgDepth: 600}, "polygon": {MaxReorgDepth: 100}},
 	}
 	store, err := backend.Open(storeCfg)
 	if err != nil {
@@ -373,13 +373,13 @@ func TestRouter_InvalidJSONRPCRequest(t *testing.T) {
 	cfg.Cache.Enabled = false
 
 	storeCfg := backend.CacheConfig{
-		Enabled:       false,
-		Path:          getUniqueTestCachePath(t),
-		MemEntries:    1000,
-		TTLLatest:     250 * time.Millisecond,
-		TTLBlock:      24 * time.Hour,
-		Clean:         true,
-		MaxReorgDepth: 100,
+		Enabled:    false,
+		Path:       getUniqueTestCachePath(t),
+		MemEntries: 1000,
+		TTLLatest:  250 * time.Millisecond,
+		TTLBlock:   24 * time.Hour,
+		Clean:      true,
+		Chains:     map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}, "base": {MaxReorgDepth: 600}, "polygon": {MaxReorgDepth: 100}},
 	}
 	store, err := backend.Open(storeCfg)
 	if err != nil {
@@ -632,13 +632,13 @@ func TestRouter_JSONRPCBatchRequest(t *testing.T) {
 	cfg.Cache.Enabled = false
 
 	storeCfg := backend.CacheConfig{
-		Enabled:       false,
-		Path:          getUniqueTestCachePath(t),
-		MemEntries:    1000,
-		TTLLatest:     250 * time.Millisecond,
-		TTLBlock:      24 * time.Hour,
-		Clean:         true,
-		MaxReorgDepth: 100,
+		Enabled:    false,
+		Path:       getUniqueTestCachePath(t),
+		MemEntries: 1000,
+		TTLLatest:  250 * time.Millisecond,
+		TTLBlock:   24 * time.Hour,
+		Clean:      true,
+		Chains:     map[string]backend.ChainCacheConfig{"ethereum": {MaxReorgDepth: 100}, "base": {MaxReorgDepth: 600}, "polygon": {MaxReorgDepth: 100}},
 	}
 	store, err := backend.Open(storeCfg)
 	if err != nil {
