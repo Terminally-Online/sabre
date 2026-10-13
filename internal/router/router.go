@@ -152,7 +152,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 		if !isBatch {
 			method = req.Method
 
-			if cached, ok := cstore.Lookup(chain, req.Method, req.Params, req.ID, &cfg.Subscriptions); ok {
+			if cached, ok := cstore.Lookup(chain, req.Method, req.Params, req.ID); ok {
 				cacheHit = true
 				zap.L().Debug("cache_hit", zap.String("chain", chain), zap.String("method", req.Method))
 				w.Header().Set("Content-Type", "application/json")
@@ -181,7 +181,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 
 			for i, reqItem := range reqs {
 				key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
-				ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
+				ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config())
 				if ttl > 0 {
 					if cached, ok := cstore.Get(key); ok {
 						cachedResponses[i] = backend.RewriteResponseID(cached, reqItem.ID)
@@ -338,10 +338,10 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 									bk.ObserveHead(blockNum)
 								}
 
-								if i < len(originalReqs) && !backend.IsErrorResponse(respBytes) {
+								if i < len(originalReqs) && backend.Cacheable(respBytes) {
 									reqItem := originalReqs[i]
 									key, _ := backend.CanonicalKey(chain, reqItem.Method, reqItem.Params)
-									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config(), &cfg.Subscriptions)
+									ttl := backend.TTL(reqItem.Method, reqItem.Params, cstore.Config())
 									if ttl > 0 {
 										cstore.Put(key, respBytes, ttl, chain, blockNum, blockHash)
 									}
@@ -408,7 +408,7 @@ func NewRouter(cstore *backend.Store, cfg *backend.Config, lb *backend.LoadBalan
 			}
 			// On a non-OK status, data is the upstream error carrying req.ID — pass through.
 		} else if !isBatch && status == http.StatusOK {
-			cstore.Store(chain, req.Method, req.Params, data, &cfg.Subscriptions)
+			cstore.Store(chain, req.Method, req.Params, data)
 		}
 
 		writeHopSafeHeaders(w, hdrs)

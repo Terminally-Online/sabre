@@ -108,6 +108,24 @@ func IsErrorResponse(response []byte) bool {
 	return ok
 }
 
+// Cacheable reports whether a single JSON-RPC response object answers with a
+// value. An error, or a null result, which is how a node says it has not seen
+// the transaction, receipt or block yet, describes the tip at the moment of
+// asking rather than the thing asked about, so it is never cached.
+func Cacheable(response []byte) bool {
+	var r struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(response, &r) != nil {
+		return false
+	}
+	result := bytes.TrimSpace(r.Result)
+	if len(result) == 0 || bytes.Equal(result, []byte("null")) {
+		return false
+	}
+	return !IsErrorResponse(response)
+}
+
 func errorField(response []byte) (json.RawMessage, bool) {
 	var r struct {
 		Error json.RawMessage `json:"error"`

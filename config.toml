@@ -107,8 +107,6 @@ enable_compression = true
 compression_level = 6
 
 [subscriptions]
-# Block time in ms, used as a sanity check when not receiving subscriptions
-ttl_block_ms = 13000
 # The maximum number of concurrent WebSocket connections per backend. This prevents
 # any single backend from being overwhelmed with WebSocket connections while ensuring
 # sufficient capacity for high-throughput subscription scenarios.
@@ -238,11 +236,11 @@ fails_to_down = 2
 # rotation. This ensures that backends are fully recovered before receiving
 # production traffic again.
 passes_to_up = 2
-# The JSON-RPC method to use for health checks. This method should be lightweight
-# and commonly supported by all Ethereum nodes. The default "eth_blockNumber" is
-# ideal as it's a simple read operation that doesn't require parameters and
-# provides a good indication that the node is functioning properly.
-method = "eth_blockNumber"
+# Every health check reads the backend's head block with
+# eth_getBlockByNumber("latest", false). The same answer that proves a backend
+# alive tells sabre how far it has synced, so block-pinned reads go to a backend
+# that has the block, and gives the cache the chain's tip by number and hash,
+# which is how it notices a reorg.
 
 [cache]
 # The cache is enabled by default, but you can disable it if you want to run
@@ -304,9 +302,19 @@ ttl_latest_ms = 250
 # hot cache without storing data that you aren't actually using.
 ttl_block_ms = 86400000
 
+# Every chain declares its own block time, in milliseconds, under
+# [cache.chains.<chain>]. Anything that waits on a chain's next block measures
+# the wait in that chain's time: a backend streaming new heads over a websocket
+# is treated as stalled once two of its chain's block times pass without one.
+# A chain served over websockets must declare it; sabre refuses to start
+# without it rather than assume another chain's clock.
+[cache.chains.1]
+block_time_ms = 12000
+
 # Base produces a block every two seconds and finalizes once its batches do on
 # Ethereum, so the twenty minutes mainnet gets from 100 blocks is 600 here.
 [cache.chains.8453]
+block_time_ms = 2000
 max_reorg_depth = 600
 
 # Your own node is the primary backend. At Terminally Online every request

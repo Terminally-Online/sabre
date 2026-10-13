@@ -7,10 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func createTestStreamConfig() Config {
@@ -25,7 +29,6 @@ func createTestStreamConfig() Config {
 
 	return Config{
 		Subscriptions: SubscriptionsConfig{
-			TTLBlock:                      13000 * time.Millisecond,
 			MaxConnectionsPerBackend:      100,
 			MaxSubscriptionsPerConnection: 50,
 			PingInterval:                  30 * time.Second,
@@ -34,6 +37,10 @@ func createTestStreamConfig() Config {
 			ReadWait:                      60 * time.Second,
 			EnableCompression:             true,
 			MaxMessageSize:                1048576,
+		},
+		Cache: CacheConfig{
+			MaxReorgDepth: 100,
+			Chains:        map[string]ChainCacheConfig{"ethereum": {BlockTime: 12 * time.Second}},
 		},
 		Backends: []*Backend{backend},
 	}
@@ -69,8 +76,8 @@ func TestNewStream(t *testing.T) {
 		t.Error("expected clients map to be initialized")
 	}
 
-	if stream.blockCache == nil {
-		t.Error("expected block cache to be initialized")
+	if stream.delivered == nil {
+		t.Error("expected delivered headers map to be initialized")
 	}
 
 	if stream.lastBlockTime == nil {
@@ -779,14 +786,12 @@ func TestStream_HandleBlockNotification(t *testing.T) {
 		t.Error("expected block time to be recorded")
 	}
 
-	blockNum := uint64(0x1234)
-	cacheKey := fmt.Sprintf("block:%s:%d", "ethereum", blockNum)
-	stream.blockCacheMu.RLock()
-	_, exists = stream.blockCache[cacheKey]
-	stream.blockCacheMu.RUnlock()
+	stream.deliveredMu.Lock()
+	hash := stream.delivered["ethereum"][0x1234]
+	stream.deliveredMu.Unlock()
 
-	if !exists {
-		t.Error("expected block to be cached")
+	if hash != "0xabcd" {
+		t.Errorf("delivered hash at 0x1234 = %q, want 0xabcd", hash)
 	}
 }
 
@@ -815,31 +820,30 @@ func TestStream_HandleBlockNotification_InvalidData(t *testing.T) {
 	}
 }
 
-func TestStream_CleanupBlockCache(t *testing.T) {
+func TestStream_DeliveredHeightsPastReorgDepthAreForgotten(t *testing.T) {
 	cfg := createTestStreamConfig()
 	lb := NewLoadBalancer(cfg)
 	stream := NewStream(cfg, lb)
 	defer stream.Shutdown(context.Background())
 
-	oldTime := time.Now().Add(-2 * stream.cfg.Subscriptions.TTLBlock)
-	stream.blockCacheMu.Lock()
-	stream.blockCache["old-block"] = oldTime
-	stream.blockCache["new-block"] = time.Now()
-	stream.blockCacheMu.Unlock()
-
-	stream.cleanupBlockCache()
-
-	stream.blockCacheMu.RLock()
-	_, oldExists := stream.blockCache["old-block"]
-	_, newExists := stream.blockCache["new-block"]
-	stream.blockCacheMu.RUnlock()
-
-	if oldExists {
-		t.Error("expected old block to be removed")
+	for n := uint64(1); n <= 250; n++ {
+		if !stream.markDelivered("ethereum", n, fmt.Sprintf("0x%x", n)) {
+			t.Fatalf("block %d was not news", n)
+		}
+	}
+	if stream.markDelivered("ethereum", 250, "0xfa") {
+		t.Error("a header already delivered was news")
 	}
 
-	if !newExists {
-		t.Error("expected new block to remain")
+	stream.deliveredMu.Lock()
+	defer stream.deliveredMu.Unlock()
+	for n := range stream.delivered["ethereum"] {
+		if n < 150 {
+			t.Errorf("height %d is more than the reorg depth below 250 and was kept", n)
+		}
+	}
+	if _, ok := stream.delivered["ethereum"][150]; !ok {
+		t.Error("height 150, within the reorg depth of 250, was forgotten")
 	}
 }
 
@@ -913,7 +917,7 @@ func TestStream_CheckBlockSanity(t *testing.T) {
 	backend := cfg.Backends[0]
 
 	backendKey := fmt.Sprintf("%s:%s", backend.Chain, backend.WSURL.String())
-	staleTime := time.Now().Add(-2 * stream.cfg.Subscriptions.TTLBlock)
+	staleTime := time.Now().Add(-3 * stream.cfg.Cache.BlockTime(backend.Chain))
 	stream.lastBlockMu.Lock()
 	stream.lastBlockTime[backendKey] = staleTime
 	stream.lastBlockMu.Unlock()
@@ -1184,9 +1188,7 @@ func TestStream_ConcurrentAccess(t *testing.T) {
 			stream.subscriptions[subscription.ID] = subscription
 			stream.mu.Unlock()
 
-			stream.blockCacheMu.Lock()
-			stream.blockCache[fmt.Sprintf("block-%d", id)] = time.Now()
-			stream.blockCacheMu.Unlock()
+			stream.markDelivered("ethereum", uint64(id+1), fmt.Sprintf("0x%x", id+1))
 
 			stream.lastBlockMu.Lock()
 			stream.lastBlockTime[fmt.Sprintf("chain-%d", id)] = time.Now()
@@ -1204,12 +1206,12 @@ func TestStream_ConcurrentAccess(t *testing.T) {
 		t.Errorf("expected %d subscriptions, got %d", numGoroutines, subscriptionCount)
 	}
 
-	stream.blockCacheMu.RLock()
-	blockCacheCount := len(stream.blockCache)
-	stream.blockCacheMu.RUnlock()
+	stream.deliveredMu.Lock()
+	deliveredCount := len(stream.delivered["ethereum"])
+	stream.deliveredMu.Unlock()
 
-	if blockCacheCount != numGoroutines {
-		t.Errorf("expected %d block cache entries, got %d", numGoroutines, blockCacheCount)
+	if deliveredCount != numGoroutines {
+		t.Errorf("expected %d delivered heights, got %d", numGoroutines, deliveredCount)
 	}
 
 	stream.lastBlockMu.RLock()
@@ -1219,4 +1221,191 @@ func TestStream_ConcurrentAccess(t *testing.T) {
 	if lastBlockCount != numGoroutines {
 		t.Errorf("expected %d last block time entries, got %d", numGoroutines, lastBlockCount)
 	}
+}
+
+// wsEndpoint is a websocket server that accepts every connection, reads until
+// the peer goes away, and hands each server-side connection to conns.
+func wsEndpoint(t *testing.T, conns chan<- *websocket.Conn) *httptest.Server {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if conns != nil {
+			conns <- c
+			return
+		}
+		go func() {
+			defer func() { _ = c.Close() }()
+			for {
+				if _, _, err := c.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func parseStreamConfig(t *testing.T, body string) Config {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := fmt.Sprintf("[cache]\nenabled = false\npath = %q\n\n%s", filepath.Join(dir, "cache"), body)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return ParseConfig(path)
+}
+
+func newHeadsClient(t *testing.T, chain string) (*WebsocketClient, *websocket.Conn) {
+	t.Helper()
+	conns := make(chan *websocket.Conn, 1)
+	srv := wsEndpoint(t, conns)
+	peer, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dialing: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	serverSide := <-conns
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	client := &WebsocketClient{
+		ID:            "client",
+		Chain:         chain,
+		Conn:          serverSide,
+		Subscriptions: make(map[string]*Subscription),
+	}
+	client.Subscriptions["sub"] = &Subscription{
+		ID:       "sub",
+		Method:   "eth_subscribe",
+		Params:   json.RawMessage(`["newHeads"]`),
+		ClientID: client.ID,
+		Created:  time.Now(),
+	}
+	return client, peer
+}
+
+func blockAt(number uint64, hash string) []byte {
+	return []byte(fmt.Sprintf(`{"result":{"number":"0x%x","hash":%q}}`, number, hash))
+}
+
+func TestStream_ReorgAtTheSameHeightIsDelivered(t *testing.T) {
+	cfg := parseStreamConfig(t, `
+[cache.chains.8453]
+block_time_ms = 2000
+
+[node.8453]
+url = "http://127.0.0.1:1"
+ws_url = "ws://127.0.0.1:1"
+`)
+	lb := NewLoadBalancer(cfg)
+	stream := NewStream(cfg, lb)
+	defer stream.Shutdown(context.Background())
+
+	client, peer := newHeadsClient(t, "8453")
+	stream.mu.Lock()
+	stream.clients[client.ID] = client
+	stream.mu.Unlock()
+
+	b := cfg.Backends[0]
+	stream.handleBlockNotification("8453", b, blockAt(0x10, "0xaaaa"))
+	stream.handleBlockNotification("8453", b, blockAt(0x10, "0xbbbb"))
+	stream.handleBlockNotification("8453", b, blockAt(0x10, "0xbbbb"))
+
+	var got []string
+	for {
+		_ = peer.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		var msg struct {
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := peer.ReadJSON(&msg); err != nil {
+			break
+		}
+		if len(msg.Params) < 2 {
+			t.Fatalf("notification without a header: %v", msg.Params)
+		}
+		_, hash := ExtractBlockInfo(msg.Params[1])
+		got = append(got, hash)
+	}
+
+	want := []string{"0xaaaa", "0xbbbb"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("delivered headers %v, want %v: the replacement for block 16 must reach the client once, the repeat not at all", got, want)
+	}
+}
+
+func TestStream_StalenessFollowsTheChainBlockTime(t *testing.T) {
+	srv := wsEndpoint(t, nil)
+	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http")
+	cfg := parseStreamConfig(t, fmt.Sprintf(`
+[cache.chains.8453]
+block_time_ms = 2000
+
+[stale.8453]
+url = "http://127.0.0.1:1"
+ws_url = "%s/stale"
+
+[live.8453]
+url = "http://127.0.0.1:1"
+ws_url = "%s/live"
+`, wsBase, wsBase))
+	lb := NewLoadBalancer(cfg)
+	stream := NewStream(cfg, lb)
+	defer stream.Shutdown(context.Background())
+
+	var stale, live *Backend
+	for _, b := range cfg.Backends {
+		switch b.Name {
+		case "stale":
+			stale = b
+		case "live":
+			live = b
+		}
+	}
+	stale.HealthUp.Store(false)
+
+	sub := &Subscription{
+		ID:      "sub",
+		Method:  "eth_subscribe",
+		Params:  json.RawMessage(`["newHeads"]`),
+		Backend: stale,
+		Created: time.Now(),
+	}
+	stream.mu.Lock()
+	stream.subscriptions[sub.ID] = sub
+	stream.mu.Unlock()
+
+	stream.lastBlockMu.Lock()
+	stream.lastBlockTime[fmt.Sprintf("%s:%s", stale.Chain, stale.WSURL.String())] = time.Now().Add(-5 * time.Second)
+	stream.lastBlockMu.Unlock()
+
+	stream.checkBlockSanity()
+
+	stream.mu.RLock()
+	moved := sub.Backend == live
+	stream.mu.RUnlock()
+	if !moved {
+		t.Errorf("a backend silent for 5s on a 2s chain kept its subscription")
+	}
+}
+
+func TestParseConfig_WebSocketChainWithoutBlockTime(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("a chain with a websocket backend and no block_time_ms parsed")
+		}
+		if !strings.Contains(fmt.Sprint(r), "8453") {
+			t.Errorf("panic %q does not name the chain", r)
+		}
+	}()
+	parseStreamConfig(t, `
+[node.8453]
+url = "http://127.0.0.1:1"
+ws_url = "ws://127.0.0.1:1"
+`)
 }

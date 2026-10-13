@@ -453,15 +453,15 @@ func TestStore_ImmutableMulticallAcrossBlocks(t *testing.T) {
 	store := openTestStore(t)
 	calls := []call3{callName, callSymbol, callDecimals}
 
-	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`), nil); ok {
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`)); ok {
 		t.Fatal("expected a miss before the cache is populated")
 	}
 
 	name, symbol, decimals := []byte("Wrapped Ether"), []byte("WETH"), []byte{0x12}
 	store.Store("1", "eth_call", multicallParams(t, "latest", calls),
-		multicallResponse(t, []multicallResult{{true, name}, {true, symbol}, {true, decimals}}), nil)
+		multicallResponse(t, []multicallResult{{true, name}, {true, symbol}, {true, decimals}}))
 
-	body, ok := store.Lookup("1", "eth_call", multicallParams(t, "0x1312d00", calls), json.RawMessage(`7`), nil)
+	body, ok := store.Lookup("1", "eth_call", multicallParams(t, "0x1312d00", calls), json.RawMessage(`7`))
 	if !ok {
 		t.Fatal("expected a hit across a different block tag")
 	}
@@ -488,15 +488,15 @@ func TestStore_MulticallMutableNotCached(t *testing.T) {
 
 	supply := []call3{callSupply}
 	store.Store("1", "eth_call", multicallParams(t, "latest", supply),
-		multicallResponse(t, []multicallResult{{true, []byte{0x64}}}), nil)
-	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", supply), json.RawMessage(`1`), nil); ok {
+		multicallResponse(t, []multicallResult{{true, []byte{0x64}}}))
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", supply), json.RawMessage(`1`)); ok {
 		t.Fatal("a mutable totalSupply read must never be served from cache")
 	}
 
 	store.Store("1", "eth_call", multicallParams(t, "latest", []call3{callDecimals}),
-		multicallResponse(t, []multicallResult{{true, []byte{0x12}}}), nil)
+		multicallResponse(t, []multicallResult{{true, []byte{0x12}}}))
 	mixed := []call3{callDecimals, callSupply}
-	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", mixed), json.RawMessage(`1`), nil); ok {
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", mixed), json.RawMessage(`1`)); ok {
 		t.Fatal("a multicall with any mutable sub-call must not be served from cache")
 	}
 }
@@ -505,12 +505,12 @@ func TestStore_ImmutableMulticallSurvivesReorg(t *testing.T) {
 	store := openTestStore(t)
 	calls := []call3{callDecimals}
 	store.Store("1", "eth_call", multicallParams(t, "latest", calls),
-		multicallResponse(t, []multicallResult{{true, []byte{0x06}}}), nil)
+		multicallResponse(t, []multicallResult{{true, []byte{0x06}}}))
 
 	store.UpdateLatestBlock("1", 1000, "0xabc", nil)
 	store.UpdateLatestBlock("1", 1000, "0xdifferent", nil) // reorg → in-memory purge
 
-	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`), nil); !ok {
+	if _, ok := store.Lookup("1", "eth_call", multicallParams(t, "latest", calls), json.RawMessage(`1`)); !ok {
 		t.Fatal("immutable sub-calls must survive a reorg purge")
 	}
 }
@@ -531,14 +531,14 @@ func TestStore_StandaloneImmutableForeverCache(t *testing.T) {
 	id := json.RawMessage(`1`)
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":"0x0000000000000000000000000000000000000000000000000000000000000006"}`)
 
-	if _, ok := store.Lookup(chain, "eth_call", params, id, nil); ok {
+	if _, ok := store.Lookup(chain, "eth_call", params, id); ok {
 		t.Fatal("expected miss before store")
 	}
-	store.Store(chain, "eth_call", params, resp, nil)
+	store.Store(chain, "eth_call", params, resp)
 
 	// Served from forever-cache even past TTLLatest.
 	time.Sleep(300 * time.Millisecond)
-	got, ok := store.Lookup(chain, "eth_call", params, id, nil)
+	got, ok := store.Lookup(chain, "eth_call", params, id)
 	if !ok {
 		t.Fatal("expected hit after store (immortal, past TTLLatest)")
 	}
@@ -579,15 +579,15 @@ func TestStore_StandaloneImmutableRevertNegativeCacheOnlyCode3(t *testing.T) {
 
 	// Transient error must NOT poison.
 	transient := "0x1111111111111111111111111111111111111111"
-	store.Store(chain, "eth_call", mk(transient), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"timeout"}}`), nil)
-	if _, ok := store.Lookup(chain, "eth_call", mk(transient), id, nil); ok {
+	store.Store(chain, "eth_call", mk(transient), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"timeout"}}`))
+	if _, ok := store.Lookup(chain, "eth_call", mk(transient), id); ok {
 		t.Fatal("transient error must not be cached")
 	}
 
 	// Genuine revert (code 3) negative-caches and is served without upstream.
 	reverter := "0x2222222222222222222222222222222222222222"
-	store.Store(chain, "eth_call", mk(reverter), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`), nil)
-	got, ok := store.Lookup(chain, "eth_call", mk(reverter), id, nil)
+	store.Store(chain, "eth_call", mk(reverter), []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`))
+	got, ok := store.Lookup(chain, "eth_call", mk(reverter), id)
 	if !ok {
 		t.Fatal("code-3 revert should be negative-cached and served")
 	}
@@ -615,7 +615,7 @@ func TestStore_LookupRewritesResponseID(t *testing.T) {
 	}()
 
 	params := json.RawMessage(`["0x1",false]`)
-	store.Store("ethereum", "eth_getBlockByNumber", params, []byte(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`), nil)
+	store.Store("ethereum", "eth_getBlockByNumber", params, []byte(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`))
 
 	tests := []struct {
 		name   string
@@ -630,7 +630,7 @@ func TestStore_LookupRewritesResponseID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body, ok := store.Lookup("ethereum", "eth_getBlockByNumber", params, tt.id, nil)
+			body, ok := store.Lookup("ethereum", "eth_getBlockByNumber", params, tt.id)
 			if !ok {
 				t.Fatalf("Lookup(ethereum, eth_getBlockByNumber, %s, %s) ok = false, want true", params, tt.id)
 			}
@@ -762,7 +762,7 @@ func TestStore_DoesNotCacheErrorResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := json.RawMessage(bytes.Replace(params, []byte("dead"), []byte(fmt.Sprintf("%04x", len(tt.name))), 1))
-			store.Store("ethereum", "eth_getBalance", p, []byte(tt.response), nil)
+			store.Store("ethereum", "eth_getBalance", p, []byte(tt.response))
 			key, _ := CanonicalKey("ethereum", "eth_getBalance", p)
 			_, found := store.Get(key)
 			if found != tt.cached {
@@ -1088,5 +1088,94 @@ func TestStore_ReorgDepthIsPerChain(t *testing.T) {
 	}
 	if store.IsBlockHashValid("8453", "0xold", 9_800) {
 		t.Error("an untracked Base hash inside its depth must not be trusted")
+	}
+}
+
+func TestTTL_PinnedReadsKeepTheCacheTTL(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+
+	tests := []struct {
+		method string
+		params string
+	}{
+		{"eth_call", `[{"to":"0x000000000000000000000000000000000000dead","data":"0x70a08231"},"0x10"]`},
+		{"eth_getBalance", `["0x000000000000000000000000000000000000dead","0x10"]`},
+		{"eth_getBlockByNumber", `["0x10",false]`},
+		{"eth_getTransactionReceipt", `["0x00000000000000000000000000000000000000000000000000000000000000aa"]`},
+		{"eth_getLogs", `[{"fromBlock":"0x1","toBlock":"0x10"}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			if got := TTL(tt.method, json.RawMessage(tt.params), cfg); got != cfg.TTLBlock {
+				t.Errorf("TTL = %v, want the cache's ttl_block %v", got, cfg.TTLBlock)
+			}
+		})
+	}
+}
+
+func TestTTL_ReadsWithoutABlockFollowTheTip(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	blockHash := `"0x00000000000000000000000000000000000000000000000000000000000000aa"`
+
+	tests := []struct {
+		name   string
+		method string
+		params string
+		want   time.Duration
+	}{
+		{"eth_call without a block", "eth_call", `[{"to":"0x000000000000000000000000000000000000dead","data":"0x70a08231"}]`, cfg.TTLLatest},
+		{"eth_call at latest", "eth_call", `[{"to":"0x000000000000000000000000000000000000dead","data":"0x70a08231"},"latest"]`, cfg.TTLLatest},
+		{"eth_call at a number", "eth_call", `[{"to":"0x000000000000000000000000000000000000dead","data":"0x70a08231"},"0x10"]`, cfg.TTLBlock},
+		{"eth_call at a block hash", "eth_call", `[{"to":"0x000000000000000000000000000000000000dead"},{"blockHash":` + blockHash + `}]`, cfg.TTLBlock},
+		{"eth_call at a number with a state override", "eth_call", `[{"to":"0x000000000000000000000000000000000000dead"},"0x10",{"0x000000000000000000000000000000000000dead":{"balance":"0x1"}}]`, cfg.TTLBlock},
+		{"eth_getBalance without a block", "eth_getBalance", `["0x000000000000000000000000000000000000dead"]`, cfg.TTLLatest},
+		{"eth_getCode without a block", "eth_getCode", `["0x000000000000000000000000000000000000dead"]`, cfg.TTLLatest},
+		{"eth_getStorageAt without a block", "eth_getStorageAt", `["0x000000000000000000000000000000000000dead","0x0"]`, cfg.TTLLatest},
+		{"eth_getStorageAt at a number", "eth_getStorageAt", `["0x000000000000000000000000000000000000dead","0x0","0x10"]`, cfg.TTLBlock},
+		{"eth_getBlockByNumber at latest", "eth_getBlockByNumber", `["latest",false]`, cfg.TTLLatest},
+		{"eth_getBlockByNumber at finalized", "eth_getBlockByNumber", `["finalized",false]`, cfg.TTLLatest},
+		{"eth_getLogs up to latest", "eth_getLogs", `[{"fromBlock":"0x1","toBlock":"latest"}]`, cfg.TTLLatest},
+		{"eth_getLogs from a number with no end", "eth_getLogs", `[{"fromBlock":"0x1"}]`, cfg.TTLLatest},
+		{"eth_getLogs from latest to a number", "eth_getLogs", `[{"fromBlock":"latest","toBlock":"0x10"}]`, cfg.TTLLatest},
+		{"eth_getLogs over a numeric range", "eth_getLogs", `[{"fromBlock":"0x1","toBlock":"0x10"}]`, cfg.TTLBlock},
+		{"eth_getLogs at a block hash", "eth_getLogs", `[{"blockHash":` + blockHash + `}]`, cfg.TTLBlock},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TTL(tt.method, json.RawMessage(tt.params), cfg); got != tt.want {
+				t.Errorf("TTL = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStore_NullResultIsNotCached(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("expected no error creating store, got %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hash := `"0x00000000000000000000000000000000000000000000000000000000000000aa"`
+	tests := []struct {
+		method string
+		params string
+	}{
+		{"eth_getTransactionReceipt", `[` + hash + `]`},
+		{"eth_getTransactionByHash", `[` + hash + `]`},
+		{"eth_getBlockByHash", `[` + hash + `,false]`},
+		{"eth_getBlockByNumber", `["0xffffffff",false]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			params := json.RawMessage(tt.params)
+			store.Store("8453", tt.method, params, []byte(`{"jsonrpc":"2.0","id":1,"result":null}`))
+			if body, ok := store.Lookup("8453", tt.method, params, json.RawMessage(`2`)); ok {
+				t.Errorf("a not-yet-known %s was served from cache: %s", tt.method, body)
+			}
+		})
 	}
 }

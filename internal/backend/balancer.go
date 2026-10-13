@@ -238,6 +238,9 @@ func (lb *LoadBalancer) GetWeights(chain string) []float64 {
 }
 
 // Monitor continuously monitors backend health and performance, updating weights accordingly.
+// Each probe reads the backend's head block, so the same response that proves
+// the backend alive advances its known head and the chain's tip, by number and
+// hash, for reorg detection.
 func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Store) {
 	if !cfg.Health.Enabled {
 		return
@@ -248,9 +251,9 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 		ID      int    `json:"id"`
 		Method  string `json:"method"`
 		Params  []any  `json:"params"`
-	}{"2.0", 1, cfg.Health.SampleMethod, nil})
+	}{"2.0", 1, "eth_getBlockByNumber", []any{"latest", false}})
 
-	t := time.NewTicker(cfg.Health.TTLCheck * time.Millisecond)
+	t := time.NewTicker(cfg.Health.TTLCheck)
 	go func() {
 		defer t.Stop()
 		for {
@@ -285,7 +288,7 @@ func (lb *LoadBalancer) Monitor(ctx context.Context, cfg Config, cacheStore *Sto
 // health state and the load-balancer weights, holding no lock across the
 // network call.
 func (lb *LoadBalancer) probe(b *Backend, body []byte, cfg Config, cacheStore *Store) {
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Health.Timeout*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Health.Timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.URL.String(), bytes.NewReader(body))

@@ -35,12 +35,11 @@ type SabreConfig struct {
 
 // HealthConfig holds the configuration for health checks.
 type HealthConfig struct {
-	Enabled      bool          `toml:"enabled"`
-	TTLCheck     time.Duration `toml:"ttl_check_ms"`
-	Timeout      time.Duration `toml:"timeout_ms"`
-	FailsToDown  int           `toml:"fails_to_down"`
-	PassesToUp   int           `toml:"passes_to_up"`
-	SampleMethod string        `toml:"method"`
+	Enabled     bool          `toml:"enabled"`
+	TTLCheck    time.Duration `toml:"ttl_check_ms"`
+	Timeout     time.Duration `toml:"timeout_ms"`
+	FailsToDown int           `toml:"fails_to_down"`
+	PassesToUp  int           `toml:"passes_to_up"`
 }
 
 // PerformanceConfig holds the configuration for HTTP/2 performance.
@@ -60,7 +59,6 @@ type PerformanceConfig struct {
 
 // SubscriptionsConfig holds the configuration for WebSocket subscriptions.
 type SubscriptionsConfig struct {
-	TTLBlock                      time.Duration `toml:"ttl_block_ms"`
 	MaxConnectionsPerBackend      int           `toml:"max_connections_per_backend"`
 	MaxSubscriptionsPerConnection int           `toml:"max_subscriptions_per_connection"`
 	PingInterval                  time.Duration `toml:"ping_interval_ms"`
@@ -182,20 +180,16 @@ func ParseConfig(path string) Config {
 		if hc.PassesToUp <= 0 {
 			hc.PassesToUp = 2
 		}
-		if hc.SampleMethod == "" {
-			hc.SampleMethod = "eth_blockNumber"
-		}
 
 		cfg.Health = hc
 	} else {
 		// Set health defaults when section is missing
 		cfg.Health = HealthConfig{
-			Enabled:      true,
-			TTLCheck:     1000 * time.Millisecond,
-			Timeout:      1500 * time.Millisecond,
-			FailsToDown:  2,
-			PassesToUp:   2,
-			SampleMethod: "eth_blockNumber",
+			Enabled:     true,
+			TTLCheck:    1000 * time.Millisecond,
+			Timeout:     1500 * time.Millisecond,
+			FailsToDown: 2,
+			PassesToUp:  2,
 		}
 	}
 
@@ -285,11 +279,6 @@ func ParseConfig(path string) Config {
 		if sc.MaxMessageSize <= 0 {
 			sc.MaxMessageSize = 1048576 // 1MB
 		}
-		if sc.TTLBlock <= 0 {
-			sc.TTLBlock = 13000 * time.Millisecond
-		} else {
-			sc.TTLBlock = sc.TTLBlock * time.Millisecond
-		}
 
 		cfg.Subscriptions = sc
 	} else {
@@ -302,7 +291,6 @@ func ParseConfig(path string) Config {
 			ReadWait:                      60 * time.Second,
 			EnableCompression:             true,
 			MaxMessageSize:                1048576, // 1MB
-			TTLBlock:                      13000 * time.Millisecond,
 		}
 	}
 
@@ -392,6 +380,10 @@ func ParseConfig(path string) Config {
 
 		if cc.MaxReorgDepth <= 0 {
 			cc.MaxReorgDepth = 100
+		}
+		for chain, chainCfg := range cc.Chains {
+			chainCfg.BlockTime = chainCfg.BlockTime * time.Millisecond
+			cc.Chains[chain] = chainCfg
 		}
 
 		p := filepath.Clean(cc.Path)
@@ -537,9 +529,12 @@ func ParseConfig(path string) Config {
 
 	hasWebSocket := false
 	for i := range cfg.Backends {
-		if cfg.Backends[i].WSURL != nil {
-			hasWebSocket = true
-			break
+		if cfg.Backends[i].WSURL == nil {
+			continue
+		}
+		hasWebSocket = true
+		if chain := cfg.Backends[i].Chain; cfg.Cache.BlockTime(chain) <= 0 {
+			panic(fmt.Sprintf("chain %s has a websocket backend but no block time: set block_time_ms under [cache.chains.%s]", chain, chain))
 		}
 	}
 

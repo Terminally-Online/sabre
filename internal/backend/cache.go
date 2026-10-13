@@ -1,12 +1,10 @@
 package backend
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,9 +37,17 @@ type CacheConfig struct {
 	Chains map[string]ChainCacheConfig `toml:"chains"`
 }
 
-// ChainCacheConfig holds the cache settings one chain overrides.
+// ChainCacheConfig holds the settings that belong to one chain.
 type ChainCacheConfig struct {
-	MaxReorgDepth int `toml:"max_reorg_depth"`
+	MaxReorgDepth int           `toml:"max_reorg_depth"`
+	BlockTime     time.Duration `toml:"block_time_ms"`
+}
+
+// BlockTime is how often the chain produces a block, from its own
+// block_time_ms, or zero when it declares none. Anything that waits on the
+// chain's next block measures the wait in this, never in another chain's.
+func (c CacheConfig) BlockTime(chainID string) time.Duration {
+	return c.Chains[chainID].BlockTime
 }
 
 // ReorgDepth is the depth, in blocks behind the chain's tip, past which the
@@ -387,7 +393,7 @@ type rpcResult struct {
 // be served from cache, or ok=false to fetch upstream. A multicall of immutable
 // reads is synthesized from its per-sub-call cache; everything else uses the
 // normal keyed cache.
-func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg *SubscriptionsConfig) ([]byte, bool) {
+func (s *Store) Lookup(chain, method string, params, id json.RawMessage) ([]byte, bool) {
 	if !s.cfg.Enabled {
 		return nil, false
 	}
@@ -413,7 +419,7 @@ func (s *Store) Lookup(chain, method string, params, id json.RawMessage, subsCfg
 		}
 		return nil, false
 	}
-	if TTL(method, params, s.cfg, subsCfg) <= 0 {
+	if TTL(method, params, s.cfg) <= 0 {
 		return nil, false
 	}
 	key, _ := CanonicalKey(chain, method, params)
@@ -445,8 +451,9 @@ func RewriteResponseID(response []byte, id json.RawMessage) []byte {
 }
 
 // Store caches an upstream response: the immutable sub-calls of a multicall, or
-// a normal keyed entry whose TTL follows the method and block tag.
-func (s *Store) Store(chain, method string, params json.RawMessage, response []byte, subsCfg *SubscriptionsConfig) {
+// a normal keyed entry whose TTL follows the method and block tag. Only a
+// response that answers with a value is kept; see Cacheable.
+func (s *Store) Store(chain, method string, params json.RawMessage, response []byte) {
 	if !s.cfg.Enabled {
 		return
 	}
@@ -458,10 +465,10 @@ func (s *Store) Store(chain, method string, params json.RawMessage, response []b
 		s.cacheImmutableCall(chain, target, callData, response)
 		return
 	}
-	if IsErrorResponse(response) {
+	if !Cacheable(response) {
 		return
 	}
-	ttl := TTL(method, params, s.cfg, subsCfg)
+	ttl := TTL(method, params, s.cfg)
 	if ttl <= 0 {
 		return
 	}
@@ -747,13 +754,14 @@ func CanonicalKey(chainID, method string, params json.RawMessage) (string, error
 }
 
 // TTL determines the appropriate time-to-live for caching a specific RPC method.
-func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *SubscriptionsConfig) time.Duration {
+// A read pinned to a block, by number or by hash, describes that block and is
+// kept for the cache's ttl_block; whether the block is still canonical is the
+// reorg tracker's question, not the clock's. A read without a block, or at a
+// named tag, describes the tip and lives for ttl_latest.
+func TTL(method string, params json.RawMessage, cfg CacheConfig) time.Duration {
 	switch method {
 	case "eth_getBlockByNumber", "eth_getBalance", "eth_getCode", "eth_getStorageAt", "eth_call":
-		if isBlockNumberTag(params) {
-			if subsCfg != nil && subsCfg.TTLBlock > 0 {
-				return subsCfg.TTLBlock
-			}
+		if pinnedToBlock(method, params) {
 			return cfg.TTLBlock
 		}
 		return cfg.TTLLatest
@@ -763,15 +771,9 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *Subscr
 		// invalidate the containing block, which the entry's block
 		// info + reorg detection handle). Use TTLBlock, same as
 		// block-number-scoped eth_call/eth_getBalance/etc.
-		if subsCfg != nil && subsCfg.TTLBlock > 0 {
-			return subsCfg.TTLBlock
-		}
 		return cfg.TTLBlock
 	case "eth_getLogs":
-		if logsNumericRange(params) {
-			if subsCfg != nil && subsCfg.TTLBlock > 0 {
-				return subsCfg.TTLBlock
-			}
+		if logsPinned(params) {
 			return cfg.TTLBlock
 		}
 		return cfg.TTLLatest
@@ -782,26 +784,65 @@ func TTL(method string, params json.RawMessage, cfg CacheConfig, subsCfg *Subscr
 	}
 }
 
-var numRegex = regexp.MustCompile(`"[0-9]+"`)
-
-func isBlockNumberTag(params json.RawMessage) bool {
-	lower := bytes.ToLower(params)
-
-	if bytes.Contains(lower, []byte(`"latest"`)) ||
-		bytes.Contains(lower, []byte(`"pending"`)) ||
-		bytes.Contains(lower, []byte(`"safe"`)) ||
-		bytes.Contains(lower, []byte(`"finalized"`)) ||
-		bytes.Contains(lower, []byte(`"earliest"`)) {
+// pinnedToBlock reports whether the request's block parameter, at the
+// method's fixed position, names a block. An omitted parameter is latest.
+func pinnedToBlock(method string, params json.RawMessage) bool {
+	idx, ok := blockParamIndex[method]
+	if !ok {
 		return false
 	}
-
-	return bytes.Contains(lower, []byte(`"0x`)) || numRegex.Match(lower)
+	var items []json.RawMessage
+	if json.Unmarshal(params, &items) != nil || idx >= len(items) {
+		return false
+	}
+	return namesBlock(items[idx])
 }
 
-func logsNumericRange(params json.RawMessage) bool {
-	low := bytes.Contains(params, []byte(`"fromBlock":"`))
-	hi := bytes.Contains(params, []byte(`"toBlock":"`))
-	return low && hi
+// logsPinned reports whether an eth_getLogs filter covers a fixed set of
+// blocks: one block by hash, or a range whose both ends are numbers. An
+// omitted end is latest.
+func logsPinned(params json.RawMessage) bool {
+	var filters []struct {
+		BlockHash string          `json:"blockHash"`
+		FromBlock json.RawMessage `json:"fromBlock"`
+		ToBlock   json.RawMessage `json:"toBlock"`
+	}
+	if json.Unmarshal(params, &filters) != nil || len(filters) == 0 {
+		return false
+	}
+	f := filters[0]
+	if f.BlockHash != "" {
+		return true
+	}
+	return isQuantity(f.FromBlock) && isQuantity(f.ToBlock)
+}
+
+// namesBlock reports whether a block parameter identifies one block: a hex
+// number, or an EIP-1898 object carrying a blockHash or blockNumber.
+func namesBlock(raw json.RawMessage) bool {
+	if isQuantity(raw) {
+		return true
+	}
+	var obj struct {
+		BlockHash   string          `json:"blockHash"`
+		BlockNumber json.RawMessage `json:"blockNumber"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	return obj.BlockHash != "" || isQuantity(obj.BlockNumber)
+}
+
+func isQuantity(raw json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	if !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+		return false
+	}
+	_, err := strconv.ParseUint(s[2:], 16, 64)
+	return err == nil
 }
 
 // ExtractBlockInfo extracts block number and hash from a JSON-RPC response.

@@ -2,6 +2,13 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,12 +34,11 @@ func createTestConfig() Config {
 			MaxAttempts: 3,
 		},
 		Health: HealthConfig{
-			Enabled:      true,
-			TTLCheck:     1000 * time.Millisecond,
-			Timeout:      1500 * time.Millisecond,
-			FailsToDown:  2,
-			PassesToUp:   2,
-			SampleMethod: "eth_blockNumber",
+			Enabled:     true,
+			TTLCheck:    1000 * time.Millisecond,
+			Timeout:     1500 * time.Millisecond,
+			FailsToDown: 2,
+			PassesToUp:  2,
 		},
 		Performance: PerformanceConfig{
 			Timeout:              2000 * time.Millisecond,
@@ -501,5 +507,128 @@ func TestBackend_HeadBelow(t *testing.T) {
 				t.Errorf("head %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// headNode answers the way a node at block 0x10 does: eth_blockNumber with the
+// height, eth_getBlockByNumber("latest") with the head block.
+func headNode(t *testing.T, probes *atomic.Int64, delay time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params []any           `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == "eth_blockNumber":
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":"0x10"}`, req.ID)
+		case req.Method == "eth_getBlockByNumber" && len(req.Params) > 0 && req.Params[0] == "latest":
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"number":"0x10","hash":"0x%064x","parentHash":"0x%064x"}}`, req.ID, 16, 15)
+		default:
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}`, req.ID)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func parseHealthConfig(t *testing.T, upstream string, ttlCheckMs, timeoutMs int) Config {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := fmt.Sprintf(`
+[health]
+enabled = true
+ttl_check_ms = %d
+timeout_ms = %d
+fails_to_down = 2
+passes_to_up = 2
+
+[cache]
+enabled = true
+path = %q
+
+[node.1]
+url = %q
+`, ttlCheckMs, timeoutMs, filepath.Join(dir, "cache"), upstream)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return ParseConfig(path)
+}
+
+func waitFor(t *testing.T, within time.Duration, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return cond()
+}
+
+func TestMonitor_ProbesOnTheConfiguredIntervalAndAdvancesTheChainTip(t *testing.T) {
+	var probes atomic.Int64
+	srv := headNode(t, &probes, 0)
+	cfg := parseHealthConfig(t, srv.URL, 20, 500)
+
+	store, err := Open(cfg.Cache)
+	if err != nil {
+		t.Fatalf("opening cache: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lb := NewLoadBalancer(cfg)
+	lb.Monitor(ctx, cfg, store)
+
+	if !waitFor(t, 2*time.Second, func() bool { return probes.Load() >= 3 }) {
+		t.Fatalf("%d probes reached the upstream in 2s with ttl_check_ms = 20", probes.Load())
+	}
+
+	b := lb.GetBackends("1")[0]
+	if !waitFor(t, time.Second, func() bool { return b.Head.Load() == 0x10 }) {
+		t.Errorf("backend head %d, want 16", b.Head.Load())
+	}
+
+	wantHash := fmt.Sprintf("0x%064x", 16)
+	if !waitFor(t, time.Second, func() bool {
+		store.mu.RLock()
+		defer store.mu.RUnlock()
+		return store.latestBlocks["1"] == 0x10 && store.latestHashes["1"] == wantHash
+	}) {
+		store.mu.RLock()
+		t.Errorf("chain tip %d %q, want 16 %q", store.latestBlocks["1"], store.latestHashes["1"], wantHash)
+		store.mu.RUnlock()
+	}
+}
+
+func TestMonitor_ProbeTimesOutAtTheConfiguredTimeout(t *testing.T) {
+	var probes atomic.Int64
+	srv := headNode(t, &probes, 5*time.Second)
+	cfg := parseHealthConfig(t, srv.URL, 20, 50)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lb := NewLoadBalancer(cfg)
+	lb.Monitor(ctx, cfg, nil)
+
+	b := lb.GetBackends("1")[0]
+	if !waitFor(t, 2*time.Second, func() bool { return !b.HealthUp.Load() }) {
+		t.Fatalf("backend still up after 2s of probes that never answer, with timeout_ms = 50 (%d probes sent)", probes.Load())
 	}
 }

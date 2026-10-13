@@ -45,12 +45,11 @@ func createTestConfig() backend.Config {
 			MaxAttempts: 3,
 		},
 		Health: backend.HealthConfig{
-			Enabled:      true,
-			TTLCheck:     1000 * time.Millisecond,
-			Timeout:      1500 * time.Millisecond,
-			FailsToDown:  2,
-			PassesToUp:   2,
-			SampleMethod: "eth_blockNumber",
+			Enabled:     true,
+			TTLCheck:    1000 * time.Millisecond,
+			Timeout:     1500 * time.Millisecond,
+			FailsToDown: 2,
+			PassesToUp:  2,
 		},
 		Performance: backend.PerformanceConfig{
 			Timeout:              2000 * time.Millisecond,
@@ -66,7 +65,6 @@ func createTestConfig() backend.Config {
 			CompressionLevel:     6,
 		},
 		Subscriptions: backend.SubscriptionsConfig{
-			TTLBlock:                      13000 * time.Millisecond,
 			MaxConnectionsPerBackend:      100,
 			MaxSubscriptionsPerConnection: 50,
 			PingInterval:                  30 * time.Second,
@@ -1075,7 +1073,7 @@ func TestRouter_BatchCacheHitServesCurrentRequestIDs(t *testing.T) {
 
 	// Another client populated the cache entry under its own id.
 	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x1",false]`),
-		[]byte(`{"jsonrpc":"2.0","id":"original-client","result":"0xcafe"}`), &cfg.Subscriptions)
+		[]byte(`{"jsonrpc":"2.0","id":"original-client","result":"0xcafe"}`))
 
 	// Upstream serves only the reduced (miss-only) batch: the eth_blockNumber item.
 	upstreamBody := `[{"jsonrpc":"2.0","id":8,"result":"0x10"}]`
@@ -1141,9 +1139,9 @@ func TestRouter_BatchAllCachedServesCurrentRequestIDs(t *testing.T) {
 	defer cleanupTestStore(t, store)
 
 	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x1",false]`),
-		[]byte(`{"jsonrpc":"2.0","id":"a","result":"0xcafe"}`), &cfg.Subscriptions)
+		[]byte(`{"jsonrpc":"2.0","id":"a","result":"0xcafe"}`))
 	store.Store("ethereum", "eth_getBlockByNumber", json.RawMessage(`["0x2",false]`),
-		[]byte(`{"jsonrpc":"2.0","id":"b","result":"0xbeef"}`), &cfg.Subscriptions)
+		[]byte(`{"jsonrpc":"2.0","id":"b","result":"0xbeef"}`))
 
 	for _, b := range cfg.Backends {
 		b.HealthUp.Store(true)
@@ -1791,5 +1789,83 @@ func TestRouter_BlockUnavailablePassesThroughOnFinalAttempt(t *testing.T) {
 	}
 	if got := hits.Load(); got != 4 {
 		t.Errorf("upstream hit %d times, want 4 (repeat went upstream again)", got)
+	}
+}
+
+// TestRouter_BatchNullResultIsNotCached covers a receipt asked for before its
+// transaction is mined: the null answer is the state of the tip, not of the
+// transaction, and must not be served again once the transaction lands.
+func TestRouter_BatchNullResultIsNotCached(t *testing.T) {
+	_ = os.RemoveAll(getUniqueTestCachePath(t))
+
+	cfg := createTestConfig()
+	store := createTestStore(t)
+	defer cleanupTestStore(t, store)
+
+	var hits atomic.Int64
+	bk := backend.CreateMockBackend("node", "ethereum", "https://node.example.com")
+	bk.HealthUp.Store(true)
+	bk.Client = &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		mined := hits.Add(1) > 1
+		var batch []struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			return nil, err
+		}
+		resps := make([]json.RawMessage, len(batch))
+		for i, m := range batch {
+			result := `null`
+			if mined {
+				result = `{"transactionHash":"0xaa","blockNumber":"0x10","status":"0x1"}`
+			}
+			resps[i] = json.RawMessage(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, m.ID, result))
+		}
+		out, _ := json.Marshal(resps)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+			Request:    r,
+		}, nil
+	})}
+	cfg.Backends = []*backend.Backend{bk}
+	cfg.BackendsCt = map[string]int{"ethereum": 1}
+
+	lb := backend.NewLoadBalancer(cfg)
+	server := NewRouter(store, &cfg, lb)
+
+	body, _ := json.Marshal([]map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": []any{"0x00000000000000000000000000000000000000000000000000000000000000aa"}},
+		{"jsonrpc": "2.0", "id": 2, "method": "eth_getTransactionReceipt", "params": []any{"0x00000000000000000000000000000000000000000000000000000000000000bb"}},
+	})
+	send := func() []struct {
+		Result json.RawMessage `json:"result"`
+	} {
+		req := httptest.NewRequest("POST", "/ethereum", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch: status = %d, want 200. body: %s", w.Code, w.Body.String())
+		}
+		var out []struct {
+			Result json.RawMessage `json:"result"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("Unmarshal(%s) error = %v", w.Body.String(), err)
+		}
+		return out
+	}
+
+	send()
+	second := send()
+	if hits.Load() != 2 {
+		t.Errorf("upstream reached %d times, want 2: the not-yet-mined receipts were served from cache", hits.Load())
+	}
+	for i, r := range second {
+		if string(r.Result) == "null" {
+			t.Errorf("item %d: mined receipt answered null", i)
+		}
 	}
 }

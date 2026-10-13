@@ -20,8 +20,8 @@ type Stream struct {
 	connections   map[string][]*WebsocketConnection
 	subscriptions map[string]*Subscription
 	clients       map[string]*WebsocketClient
-	blockCache    map[string]time.Time
-	blockCacheMu  sync.RWMutex
+	delivered     map[string]map[uint64]string // chain -> block number -> hash last delivered
+	deliveredMu   sync.Mutex
 	lastBlockTime map[string]time.Time // key: "chain:backendURL"
 	lastBlockMu   sync.RWMutex
 	mu            sync.RWMutex
@@ -81,7 +81,7 @@ func NewStream(cfg Config, loadBalancer *LoadBalancer) *Stream {
 		connections:   make(map[string][]*WebsocketConnection),
 		subscriptions: make(map[string]*Subscription),
 		clients:       make(map[string]*WebsocketClient),
-		blockCache:    make(map[string]time.Time),
+		delivered:     make(map[string]map[uint64]string),
 		lastBlockTime: make(map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -91,8 +91,27 @@ func NewStream(cfg Config, loadBalancer *LoadBalancer) *Stream {
 		},
 	}
 
-	go stream.sanityCheckLoop()
+	if interval := stream.sanityInterval(); interval > 0 {
+		go stream.sanityCheckLoop(interval)
+	}
 	return stream
+}
+
+// sanityInterval is the shortest block time among the chains served over
+// websockets, so a stalled backend on the fastest chain is noticed within a
+// block of going stale. Zero when no chain is served over websockets, and so
+// none has heads to go quiet.
+func (wm *Stream) sanityInterval() time.Duration {
+	var interval time.Duration
+	for _, b := range wm.cfg.Backends {
+		if b.WSURL == nil {
+			continue
+		}
+		if bt := wm.cfg.Cache.BlockTime(b.Chain); bt > 0 && (interval == 0 || bt < interval) {
+			interval = bt
+		}
+	}
+	return interval
 }
 
 // Shutdown gracefully shuts down the stream manager and closes all connections.
@@ -581,34 +600,50 @@ func (wm *Stream) handleBlockNotification(chain string, backend *Backend, blockD
 	wm.lastBlockTime[backendKey] = time.Now()
 	wm.lastBlockMu.Unlock()
 
-	cacheKey := fmt.Sprintf("block:%s:%d", chain, blockNum)
-
-	wm.blockCacheMu.Lock()
-	if lastNotified, exists := wm.blockCache[cacheKey]; exists {
-		if time.Since(lastNotified) < wm.cfg.Subscriptions.TTLBlock {
-			wm.blockCacheMu.Unlock()
-			return
-		}
+	if !wm.markDelivered(chain, blockNum, blockHash) {
+		return
 	}
-
-	wm.blockCache[cacheKey] = time.Now()
-	wm.blockCacheMu.Unlock()
-
-	go wm.cleanupBlockCache()
 
 	wm.notifyBlockSubscribers(chain, blockData)
 }
 
-func (wm *Stream) cleanupBlockCache() {
-	wm.blockCacheMu.Lock()
-	defer wm.blockCacheMu.Unlock()
+// markDelivered records the header as the one delivered at its height and
+// reports whether it is news: a header already delivered, which every backend
+// streaming the chain sends once, is not, while a different hash at a height
+// already delivered is a reorg and is. Heights more than the chain's reorg
+// depth below this one are forgotten.
+func (wm *Stream) markDelivered(chain string, blockNum uint64, blockHash string) bool {
+	wm.deliveredMu.Lock()
+	defer wm.deliveredMu.Unlock()
 
-	cutoff := time.Now().Add(-wm.cfg.Subscriptions.TTLBlock)
-	for key, timestamp := range wm.blockCache {
-		if timestamp.Before(cutoff) {
-			delete(wm.blockCache, key)
+	heights := wm.delivered[chain]
+	if heights == nil {
+		heights = make(map[uint64]string)
+		wm.delivered[chain] = heights
+	}
+	if heights[blockNum] == blockHash {
+		return false
+	}
+	heights[blockNum] = blockHash
+
+	depth := wm.cfg.Cache.ReorgDepth(chain)
+	if uint64(len(heights)) > depth && blockNum > depth {
+		cutoff := blockNum - depth
+		for n := range heights {
+			if n < cutoff {
+				delete(heights, n)
+			}
 		}
 	}
+	return true
+}
+
+// staleAfter is how long a backend streaming the chain's heads may go without
+// one before it is treated as stale: past two of the chain's block times it has
+// missed a block it should have delivered, where a single block time is
+// crossed by ordinary propagation jitter.
+func (wm *Stream) staleAfter(chain string) time.Duration {
+	return 2 * wm.cfg.Cache.BlockTime(chain)
 }
 
 func (wm *Stream) hasActiveBlockSubscriptions(backend *Backend) bool {
@@ -635,14 +670,14 @@ func (wm *Stream) checkBlockSanity() {
 	staleBackends := make([]*Backend, 0)
 
 	for backendKey, lastBlock := range wm.lastBlockTime {
-		if time.Since(lastBlock) > wm.cfg.Subscriptions.TTLBlock {
-			// Extract chain and WSURL from backendKey "chain:wsurl"
-			parts := strings.SplitN(backendKey, ":", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			chain, wsURL := parts[0], parts[1]
+		// Extract chain and WSURL from backendKey "chain:wsurl"
+		parts := strings.SplitN(backendKey, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		chain, wsURL := parts[0], parts[1]
 
+		if time.Since(lastBlock) > wm.staleAfter(chain) {
 			// Find the backend struct
 			for _, backend := range wm.cfg.Backends {
 				if backend.Chain == chain && backend.WSURL.String() == wsURL {
@@ -693,13 +728,15 @@ func (wm *Stream) resetBackendConnections(staleBackend *Backend) {
 		return
 	}
 
+	oldConn := wm.getWSConnection(staleBackend)
+
 	wm.mu.Lock()
 	for _, sub := range affectedSubscriptions {
 		// Move subscription to new backend
 		sub.Backend = newBackend
 
 		// Remove from old backend connection
-		if oldConn := wm.getWSConnection(staleBackend); oldConn != nil {
+		if oldConn != nil {
 			oldConn.mu.Lock()
 			delete(oldConn.Subscriptions, sub.ID)
 			oldConn.mu.Unlock()
@@ -753,8 +790,8 @@ func (wm *Stream) closeBackendConnection(backend *Backend) {
 	}
 }
 
-func (wm *Stream) sanityCheckLoop() {
-	ticker := time.NewTicker(wm.cfg.Subscriptions.TTLBlock)
+func (wm *Stream) sanityCheckLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for range ticker.C {

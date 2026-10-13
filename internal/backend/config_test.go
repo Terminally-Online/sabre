@@ -28,7 +28,6 @@ enable_compression = true
 compression_level = 6
 
 [subscriptions]
-ttl_block_ms = 13000
 max_connections_per_backend = 100
 max_subscriptions_per_connection = 50
 ping_interval_ms = 30000
@@ -50,7 +49,6 @@ ttl_check_ms = 1000
 timeout_ms = 1500
 fails_to_down = 2
 passes_to_up = 2
-method = "eth_blockNumber"
 
 [cache]
 enabled = true
@@ -60,6 +58,9 @@ ttl_latest_ms = 250
 ttl_block_ms = 86400000
 max_reorg_depth = 100
 clean = true
+
+[cache.chains.1]
+block_time_ms = 12000
 
 [reth.1]
 url = "https://api.example.com"
@@ -101,10 +102,6 @@ ws_url = "wss://api.example.com"
 
 	if cfg.Health.PassesToUp != 2 {
 		t.Errorf("expected default passes to up 2, got %d", cfg.Health.PassesToUp)
-	}
-
-	if cfg.Health.SampleMethod != "eth_blockNumber" {
-		t.Errorf("expected default sample method eth_blockNumber, got %s", cfg.Health.SampleMethod)
 	}
 
 	if cfg.Performance.Timeout != 2000*time.Millisecond {
@@ -167,10 +164,6 @@ ws_url = "wss://api.example.com"
 		t.Errorf("expected default max message size 1048576, got %d", cfg.Subscriptions.MaxMessageSize)
 	}
 
-	if cfg.Subscriptions.TTLBlock != 13000*time.Millisecond {
-		t.Errorf("expected default TTL block 13000ms, got %v", cfg.Subscriptions.TTLBlock)
-	}
-
 	if cfg.Batch.MaxBatchSize != 10 {
 		t.Errorf("expected default max batch size 10, got %d", cfg.Batch.MaxBatchSize)
 	}
@@ -216,7 +209,6 @@ ttl_check_ms = 2000
 timeout_ms = 3000
 fails_to_down = 3
 passes_to_up = 1
-method = "eth_chainId"
 
 [performance]
 timeout_ms = 5000
@@ -232,7 +224,6 @@ enable_compression = false
 compression_level = 9
 
 [subscriptions]
-ttl_block_ms = 15000
 max_connections_per_backend = 50
 max_subscriptions_per_connection = 25
 ping_interval_ms = 60000
@@ -256,6 +247,9 @@ ttl_latest_ms = 500
 ttl_block_ms = 172800000
 max_reorg_depth = 200
 clean = true
+
+[cache.chains.1]
+block_time_ms = 12000
 
 [reth.1]
 url = "https://api.example.com"
@@ -297,10 +291,6 @@ ws_url = "wss://api.example.com"
 
 	if cfg.Health.PassesToUp != 1 {
 		t.Errorf("expected custom passes to up 1, got %d", cfg.Health.PassesToUp)
-	}
-
-	if cfg.Health.SampleMethod != "eth_chainId" {
-		t.Errorf("expected custom sample method eth_chainId, got %s", cfg.Health.SampleMethod)
 	}
 
 	if cfg.Performance.Timeout != 5000*time.Millisecond {
@@ -345,10 +335,6 @@ ws_url = "wss://api.example.com"
 
 	if cfg.Performance.CompressionLevel != 9 {
 		t.Errorf("expected custom compression level 9, got %d", cfg.Performance.CompressionLevel)
-	}
-
-	if cfg.Subscriptions.TTLBlock != 15000*time.Millisecond {
-		t.Errorf("expected custom TTL block 15000ms, got %v", cfg.Subscriptions.TTLBlock)
 	}
 
 	if cfg.Subscriptions.MaxConnectionsPerBackend != 50 {
@@ -437,6 +423,9 @@ ethereum = { url = "https://api.example.com", ws_url = "wss://api.example.com" }
 [alchemy]
 max_per_second = 100
 ethereum = { url = "https://eth-mainnet.alchemyapi.io/v2/KEY", ws_url = "wss://eth-mainnet.ws.alchemyapi.io/v2/KEY" }
+
+[cache.chains.ethereum]
+block_time_ms = 12000
 `
 
 	tmpDir := t.TempDir()
@@ -520,6 +509,15 @@ ethereum = { url = "https://api.example.com/CHAIN_NAME", ws_url = "wss://api.exa
 
 [multi]
 "polygon,arbitrum" = { url = "https://api.example.com/CHAIN_NAME", ws_url = "wss://api.example.com/CHAIN_NAME" }
+
+[cache.chains.ethereum]
+block_time_ms = 12000
+
+[cache.chains.polygon]
+block_time_ms = 2000
+
+[cache.chains.arbitrum]
+block_time_ms = 250
 `
 
 	tmpDir := t.TempDir()
@@ -598,6 +596,9 @@ listen = "${API_URL}:3000"
 
 [reth]
 ethereum = { url = "${API_URL}/v1/${API_KEY}", ws_url = "${WS_URL}/v1/${API_KEY}" }
+
+[cache.chains.ethereum]
+block_time_ms = 12000
 `
 
 	tmpDir := t.TempDir()
@@ -875,5 +876,52 @@ url = "https://base.example.com"
 	}
 	if got := cfg.Cache.ReorgDepth("8453"); got != 600 {
 		t.Errorf("ReorgDepth(8453) = %d, want 600", got)
+	}
+}
+
+func TestParseConfig_PerChainBlockTime(t *testing.T) {
+	configContent := `
+[cache]
+enabled = true
+path = "` + "PATH" + `"
+
+[cache.chains.1]
+block_time_ms = 12000
+
+[cache.chains.8453]
+block_time_ms = 2000
+max_reorg_depth = 600
+
+[reth.1]
+url = "https://eth.example.com"
+ws_url = "wss://eth.example.com"
+
+[reth.8453]
+url = "https://base.example.com"
+ws_url = "wss://base.example.com"
+
+[reth.10]
+url = "https://op.example.com"
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := strings.Replace(configContent, "PATH", filepath.Join(tmpDir, "cache"), 1)
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := ParseConfig(configPath)
+
+	if got := cfg.Cache.BlockTime("1"); got != 12*time.Second {
+		t.Errorf("BlockTime(1) = %v, want 12s", got)
+	}
+	if got := cfg.Cache.BlockTime("8453"); got != 2*time.Second {
+		t.Errorf("BlockTime(8453) = %v, want 2s", got)
+	}
+	if got := cfg.Cache.ReorgDepth("8453"); got != 600 {
+		t.Errorf("ReorgDepth(8453) = %d, want 600", got)
+	}
+	if got := cfg.Cache.BlockTime("10"); got != 0 {
+		t.Errorf("BlockTime(10) = %v, want none declared", got)
 	}
 }
