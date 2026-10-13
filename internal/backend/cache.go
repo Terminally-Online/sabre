@@ -32,6 +32,26 @@ type CacheConfig struct {
 	// table blocks. Pebble's own default is small enough that a working set of
 	// any size reads from disk on nearly every lookup.
 	BlockCacheBytes int64 `toml:"block_cache_bytes"`
+
+	// Chains overrides settings for one chain, keyed by the same chain name
+	// the backends are configured under. A reorg depth counted in blocks is a
+	// wall-clock window that differs with each chain's block time.
+	Chains map[string]ChainCacheConfig `toml:"chains"`
+}
+
+// ChainCacheConfig holds the cache settings one chain overrides.
+type ChainCacheConfig struct {
+	MaxReorgDepth int `toml:"max_reorg_depth"`
+}
+
+// ReorgDepth is the depth, in blocks behind the chain's tip, past which the
+// chain's data is treated as immutable: the chain's own max_reorg_depth when
+// it declares one, else the global MaxReorgDepth.
+func (c CacheConfig) ReorgDepth(chainID string) uint64 {
+	if chain, ok := c.Chains[chainID]; ok && chain.MaxReorgDepth > 0 {
+		return uint64(chain.MaxReorgDepth)
+	}
+	return uint64(c.MaxReorgDepth)
 }
 
 // Store provides persistent caching with TTL support and block hash validation.
@@ -83,7 +103,7 @@ func (s *Store) UpdateLatestBlock(chainID string, blockNum uint64, blockHash str
 
 	reorgDetected := s.detectReorg(chainID, blockNum, blockHash, blockData)
 	if reorgDetected && s.mem != nil {
-		s.mem.Purge()
+		s.purgeChain(chainID)
 	}
 
 	s.blockHashes[chainID][blockNum] = blockHash
@@ -124,13 +144,25 @@ func (s *Store) detectReorg(chainID string, newBlockNum uint64, newBlockHash str
 	return false
 }
 
+// purgeChain drops a chain's entries from the memory tier after a reorg on
+// that chain. Every other chain's entries describe blocks the reorg did not
+// touch, so they stay.
+func (s *Store) purgeChain(chainID string) {
+	for _, key := range s.mem.Keys() {
+		if e, ok := s.mem.Peek(key); ok && e.ChainID == chainID {
+			s.mem.Remove(key)
+		}
+	}
+}
+
 func (s *Store) cleanupOldBlockHashes(chainID string) {
 	chainHashes := s.blockHashes[chainID]
-	if len(chainHashes) <= s.cfg.MaxReorgDepth*2 {
+	window := 2 * s.cfg.ReorgDepth(chainID)
+	if uint64(len(chainHashes)) <= window || s.latestBlocks[chainID] < window {
 		return
 	}
 
-	cutoff := s.latestBlocks[chainID] - uint64(s.cfg.MaxReorgDepth*2)
+	cutoff := s.latestBlocks[chainID] - window
 	for blockNum := range chainHashes {
 		if blockNum < cutoff {
 			delete(chainHashes, blockNum)
@@ -153,7 +185,7 @@ func (s *Store) IsBlockHashValid(chainID string, entryBlockHash string, entryBlo
 		}
 	}
 
-	if s.latestBlocks[chainID] > 0 && s.latestBlocks[chainID]-entryBlockNum <= uint64(s.cfg.MaxReorgDepth) {
+	if s.latestBlocks[chainID] > 0 && s.latestBlocks[chainID]-entryBlockNum <= s.cfg.ReorgDepth(chainID) {
 		return false
 	}
 
@@ -198,7 +230,7 @@ func (s *Store) Get(key string) ([]byte, bool) {
 // Put stores a value in the cache with the specified TTL and chain ID.
 // If callBlockNum/callBlockHash are non-zero, they identify the block the
 // response data is about (extracted from the response body via
-// ExtractBlockInfo). When the caller's block is past MaxReorgDepth behind
+// ExtractBlockInfo). When the caller's block is past the chain's reorg depth behind
 // the chain tip, the entry is immutable and stored with an effectively
 // infinite expiry — no point re-fetching historical data that cannot
 // change. Callers that don't have block info (non-block-scoped methods)
@@ -221,7 +253,7 @@ func (s *Store) Put(key string, body []byte, ttl time.Duration, chainID string, 
 	}
 
 	exp := time.Now().Add(ttl).UnixMilli()
-	if callBlockNum > 0 && latestTipBlock > callBlockNum && latestTipBlock-callBlockNum > uint64(s.cfg.MaxReorgDepth) {
+	if callBlockNum > 0 && latestTipBlock > callBlockNum && latestTipBlock-callBlockNum > s.cfg.ReorgDepth(chainID) {
 		// Past reorg depth: data is immutable. Never expire.
 		exp = math.MaxInt64
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1033,5 +1034,59 @@ func TestIsErrorResponse(t *testing.T) {
 				t.Errorf("IsErrorResponse = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStore_ReorgPurgesOnlyItsOwnChain(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	defer cleanupTestCache(t, cfg)
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	store.Put("mainnet-key", []byte("mainnet"), time.Hour, "1", 0, "")
+	store.Put("base-key", []byte("base"), time.Hour, "8453", 0, "")
+
+	store.UpdateLatestBlock("8453", 1000, "0xabc", nil)
+	store.UpdateLatestBlock("8453", 1000, "0xdifferent", nil) // reorg on Base
+
+	if !store.mem.Contains("mainnet-key") {
+		t.Error("a Base reorg evicted a mainnet entry from memory")
+	}
+	if store.mem.Contains("base-key") {
+		t.Error("a Base reorg left a Base entry in memory")
+	}
+}
+
+func TestStore_ReorgDepthIsPerChain(t *testing.T) {
+	cfg := createUniqueTestCacheConfig(t)
+	cfg.Chains = map[string]ChainCacheConfig{"8453": {MaxReorgDepth: 600}}
+	defer cleanupTestCache(t, cfg)
+	store, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// 200 blocks behind the tip: past mainnet's 100-block depth, but only
+	// 400 seconds of Base, which has not finalized on L1 yet.
+	for _, chain := range []string{"1", "8453"} {
+		store.UpdateLatestBlock(chain, 10_000, "0xtip", nil)
+		store.Put("pinned-"+chain, []byte("body"), time.Second, chain, 9_800, "0xold")
+	}
+
+	if e, ok := store.mem.Peek("pinned-1"); !ok || e.Expiry != math.MaxInt64 {
+		t.Error("a mainnet read 200 blocks deep should be immutable")
+	}
+	if e, ok := store.mem.Peek("pinned-8453"); !ok || e.Expiry == math.MaxInt64 {
+		t.Error("a Base read 200 blocks deep is inside its reorg depth and must stay mortal")
+	}
+	if !store.IsBlockHashValid("1", "0xold", 9_800) {
+		t.Error("an untracked mainnet hash past the depth should be valid")
+	}
+	if store.IsBlockHashValid("8453", "0xold", 9_800) {
+		t.Error("an untracked Base hash inside its depth must not be trusted")
 	}
 }

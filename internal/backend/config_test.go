@@ -3,6 +3,7 @@ package backend
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -841,5 +842,38 @@ func TestAppendCount(t *testing.T) {
 	result = appendCount(existing, "new")
 	if result["new"] != 1 {
 		t.Errorf("expected new count 1, got %d", result["new"])
+	}
+}
+
+func TestParseConfig_PerChainReorgDepth(t *testing.T) {
+	configContent := `
+[cache]
+enabled = true
+path = "` + "PATH" + `"
+max_reorg_depth = 100
+
+[cache.chains.8453]
+max_reorg_depth = 600
+
+[reth.1]
+url = "https://eth.example.com"
+
+[reth.8453]
+url = "https://base.example.com"
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := strings.Replace(configContent, "PATH", filepath.Join(tmpDir, "cache"), 1)
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := ParseConfig(configPath)
+
+	if got := cfg.Cache.ReorgDepth("1"); got != 100 {
+		t.Errorf("ReorgDepth(1) = %d, want the global 100", got)
+	}
+	if got := cfg.Cache.ReorgDepth("8453"); got != 600 {
+		t.Errorf("ReorgDepth(8453) = %d, want 600", got)
 	}
 }

@@ -80,7 +80,10 @@ With ⚔️ **sabre** running, you can can submit JSON-RPC requests to the follo
 The value of `{chain_domain}` is the value you set when configuring the urls of a provider like:
 
 ```toml
-[providers.ethereum]
+[reth.1]
+url = "..."
+
+[reth.8453]
 url = "..."
 ```
 
