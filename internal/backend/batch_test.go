@@ -538,7 +538,7 @@ func TestBatchProcessor_MissingUpstreamResponse(t *testing.T) {
 		t.Fatalf("AddRequest: %v", err)
 	}
 	ch2, err := bp.AddRequest(context.Background(), "https://upstream.example", BatchRequest{
-		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_getLogs", Params: json.RawMessage(`["b"]`),
+		JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_getBalance", Params: json.RawMessage(`["b"]`),
 	}, client)
 	if err != nil {
 		t.Fatalf("AddRequest: %v", err)
@@ -558,8 +558,8 @@ func TestBatchProcessor_MissingUpstreamResponse(t *testing.T) {
 		if resp.HasError() {
 			t.Fatalf("surviving request: unexpected error %s", resp.Error)
 		}
-		if string(resp.Result) != `"m=eth_getLogs"` {
-			t.Errorf("surviving request: got payload %s, want \"m=eth_getLogs\"", resp.Result)
+		if string(resp.Result) != `"m=eth_getBalance"` {
+			t.Errorf("surviving request: got payload %s, want \"m=eth_getBalance\"", resp.Result)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("surviving request: no response delivered")

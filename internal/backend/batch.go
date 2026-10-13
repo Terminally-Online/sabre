@@ -74,6 +74,22 @@ type batchEntry struct {
 	ch  chan BatchResponse
 }
 
+// rangeScans are the methods whose upstream cost grows with the span of chain
+// they read or replay rather than with the request itself. An upstream batch
+// is answered only once its slowest member is, so each of these is sent on its
+// own instead of holding every request coalesced beside it.
+var rangeScans = map[string]bool{
+	"eth_getLogs":                   true,
+	"trace_filter":                  true,
+	"trace_block":                   true,
+	"trace_replayBlockTransactions": true,
+	"trace_replayTransaction":       true,
+	"trace_transaction":             true,
+	"debug_traceBlockByNumber":      true,
+	"debug_traceBlockByHash":        true,
+	"debug_traceTransaction":        true,
+}
+
 // Batch represents a collection of requests to be sent to a single backend.
 type Batch struct {
 	BackendURL string
@@ -122,21 +138,6 @@ func (bp *BatchProcessor) AddRequest(ctx context.Context, backendURL string, req
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
-	batch, exists := bp.batches[backendURL]
-	if !exists {
-		batch = &Batch{
-			BackendURL: backendURL,
-			Client:     client,
-			Created:    time.Now(),
-			dispatch:   make(chan struct{}),
-			workers:    bp.poolLocked(backendURL),
-			entries:    make([]batchEntry, 0, bp.maxBatchSize),
-		}
-		bp.batches[backendURL] = batch
-
-		go bp.processBatch(batch)
-	}
-
 	reqCopy := BatchRequest{
 		JSONRPC: req.JSONRPC,
 		Method:  req.Method,
@@ -157,6 +158,35 @@ func (bp *BatchProcessor) AddRequest(ctx context.Context, backendURL string, req
 	}
 
 	responseChan := make(chan BatchResponse, 1)
+
+	if rangeScans[reqCopy.Method] {
+		solo := &Batch{
+			BackendURL: backendURL,
+			Client:     client,
+			Created:    time.Now(),
+			dispatch:   make(chan struct{}),
+			workers:    bp.poolLocked(backendURL),
+			entries:    []batchEntry{{ctx: ctx, req: reqCopy, ch: responseChan}},
+		}
+		close(solo.dispatch)
+		go bp.processBatch(solo)
+		return responseChan, nil
+	}
+
+	batch, exists := bp.batches[backendURL]
+	if !exists {
+		batch = &Batch{
+			BackendURL: backendURL,
+			Client:     client,
+			Created:    time.Now(),
+			dispatch:   make(chan struct{}),
+			workers:    bp.poolLocked(backendURL),
+			entries:    make([]batchEntry, 0, bp.maxBatchSize),
+		}
+		bp.batches[backendURL] = batch
+
+		go bp.processBatch(batch)
+	}
 
 	batch.mu.Lock()
 	batch.entries = append(batch.entries, batchEntry{ctx: ctx, req: reqCopy, ch: responseChan})

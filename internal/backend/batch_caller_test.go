@@ -148,3 +148,40 @@ func TestOneBackendsLoadDoesNotStarveAnother(t *testing.T) {
 		t.Fatal("a backend with no load waited on another backend's workers")
 	}
 }
+
+func TestAPointReadIsNotHeldBehindARangeScan(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "eth_getLogs") {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		answerBatch(w, body)
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	bp := NewBatchProcessor(10, 20*time.Millisecond, 4, 0, MulticallConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := bp.AddRequest(ctx, srv.URL, BatchRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "eth_getLogs", Params: json.RawMessage(`[{"fromBlock":"0x1","toBlock":"0x186a0"}]`)}, srv.Client()); err != nil {
+		t.Fatalf("AddRequest: %v", err)
+	}
+	ch, err := bp.AddRequest(context.Background(), srv.URL, BatchRequest{JSONRPC: "2.0", ID: json.RawMessage(`2`), Method: "eth_getStorageAt", Params: json.RawMessage(`["0x6c561B446416E1A00E8E93E221854d6eA4171372","0x0","latest"]`)}, srv.Client())
+	if err != nil {
+		t.Fatalf("AddRequest: %v", err)
+	}
+
+	select {
+	case resp := <-ch:
+		if resp.InternalErr != nil {
+			t.Fatalf("point read: %v", resp.InternalErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a point read waited on a range scan it shared an upstream batch with")
+	}
+}
