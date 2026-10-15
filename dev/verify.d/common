@@ -14,8 +14,6 @@ export CGO_ENABLED=0
 CORES="${VERIFY_CORES:-4}"
 export GOMAXPROCS="$CORES"
 
-SIGNOFF="${VERIFY_SIGNOFF:-}"
-
 lint_base() {
 	local base head
 	head="$(git rev-parse HEAD)"

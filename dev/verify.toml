@@ -7,13 +7,6 @@ leases = ["tool:sabre-cache"]
 cores = 1
 timeout_seconds = 600
 
-[job.fetch]
-run = "git fetch -q origin master"
-when = "signoff"
-leases = ["repo:git-index"]
-cores = 1
-timeout_seconds = 300
-
 [job.lint]
 needs = ["tools"]
 run = "dev/verify.d/lint"
