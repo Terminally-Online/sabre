@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+FORGE_URL="${FORGE_URL:-https://git.ca.plug.to}"
+FORGE_URL="${FORGE_URL%/}"
+
+tea_config="$HOME/Library/Application Support/tea/config.yml"
+[[ -f "$tea_config" ]] || tea_config="$HOME/.config/tea/config.yml"
+FORGE_TOKEN="${FORGE_TOKEN:-$(sed -n 's/^[[:space:]]*token:[[:space:]]*//p' "$tea_config" 2>/dev/null | head -1)}"
+[[ -n "$FORGE_TOKEN" ]] || {
+	echo "FAIL: no forge token — log tea in to ${FORGE_URL#*://} or export FORGE_TOKEN"
+	exit 1
+}
+
+FORGE_REPO="$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#^.*[:/]([^/:]+/[^/:]+)$#\1#')"
+[[ "$FORGE_REPO" == */* ]] || {
+	echo "FAIL: origin names no forge repository"
+	exit 1
+}
+
+forge() {
+	local method="$1" path="$2" data="${3:-}" body code
+	body="$(mktemp)"
+	local args=(-sS -o "$body" -w '%{http_code}' -X "$method"
+		-H "Authorization: token $FORGE_TOKEN" -H "Accept: application/json")
+	[[ -n "$data" ]] && args+=(-H "Content-Type: application/json" --data "$data")
+	code="$(curl "${args[@]}" "$FORGE_URL/api/v1/repos/$FORGE_REPO$path")" || code=000
+	cat "$body"
+	rm -f "$body"
+	case "$code" in
+	2??) return 0 ;;
+	404) return 4 ;;
+	*)
+		echo "FAIL: the forge answered $code to $method /repos/$FORGE_REPO$path" >&2
+		return 1
+		;;
+	esac
+}

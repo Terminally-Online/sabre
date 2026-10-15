@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/forge"
+
+sha="${1:-}"
+[[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || {
+	echo "usage: dev/release.d/green <full commit sha>"
+	exit 64
+}
+
+repo="$(forge GET "")"
+branch="$(jq -r .default_branch <<<"$repo")"
+
+if pr="$(forge GET "/commits/$sha/pull")"; then
+	:
+elif [[ $? == 4 ]]; then
+	echo "FAIL: no pull request merged ${sha:0:12}; it reached the forge around the gate"
+	exit 1
+else
+	exit 1
+fi
+number="$(jq -r .number <<<"$pr")"
+[[ "$(jq -r .merged <<<"$pr")" == true && "$(jq -r .merge_commit_sha <<<"$pr")" == "$sha" ]] || {
+	echo "FAIL: ${sha:0:12} is not the commit #$number merged"
+	exit 1
+}
+base="$(jq -r .base.ref <<<"$pr")"
+[[ "$base" == "$branch" ]] || {
+	echo "FAIL: #$number merged ${sha:0:12} into $base, not $branch"
+	exit 1
+}
+head="$(jq -r .head.sha <<<"$pr")"
+
+if protection="$(forge GET "/branch_protections/$(jq -rn --arg b "$branch" '$b|@uri')")"; then
+	:
+elif [[ $? == 4 ]]; then
+	echo "FAIL: $branch is not protected; no check vouches for what merges into it"
+	exit 1
+else
+	exit 1
+fi
+[[ "$(jq -r '.enable_status_check and ((.status_check_contexts // []) | length > 0)' <<<"$protection")" == true ]] || {
+	echo "FAIL: $branch requires no checks; nothing vouches for what merges into it"
+	exit 1
+}
+
+statuses="[]"
+limit=50
+for ((page = 1; ; page++)); do
+	combined="$(forge GET "/commits/$head/status?page=$page&limit=$limit")" || exit 1
+	batch="$(jq -c '.statuses // []' <<<"$combined")"
+	statuses="$(jq -c --argjson b "$batch" '. + $b' <<<"$statuses")"
+	(($(jq length <<<"$batch") == limit)) || break
+done
+
+verdict="$(jq -r --argjson statuses "$statuses" '
+	def pattern:
+		reduce (split("") | .[]) as $c ({re: "", class: false, opened: false, depth: 0};
+			if .class then
+				if $c == "]" and (.opened | not) then .re += "]" | .class = false
+				elif $c == "!" and .opened then .re += "^" | .opened = false
+				elif $c == "\\" then .re += "\\\\" | .opened = false
+				else .re += $c | .opened = false end
+			elif $c == "[" then .re += "[" | .class = true | .opened = true
+			elif $c == "{" then .re += "(?:" | .depth += 1
+			elif $c == "}" and .depth > 0 then .re += ")" | .depth -= 1
+			elif $c == "," and .depth > 0 then .re += "|"
+			elif $c == "*" then .re += ".*"
+			elif $c == "?" then .re += "."
+			elif ($c | test("^[A-Za-z0-9 _-]$")) then .re += $c
+			else .re += "\\" + $c end)
+		| "^" + .re + "$";
+	.status_check_contexts[] as $required
+	| ($required | pattern) as $re
+	| [$statuses[] | select(.context | test($re))] as $matched
+	| if ($matched | length) == 0 then "\($required): never reported"
+	  else $matched[] | select(.status != "success") | "\(.context): \(.status)" end
+' <<<"$protection")"
+
+if [[ -n "$verdict" ]]; then
+	echo "FAIL: #$number merged ${sha:0:12} without every check $branch requires green on its head ${head:0:12}:"
+	sed 's/^/  /' <<<"$verdict"
+	exit 1
+fi
+echo "${sha:0:12} is green: #$number merged it into $branch with every required check passing on ${head:0:12}"

@@ -21,6 +21,8 @@ git fetch -q origin master
 	exit 1
 }
 
+dev/release.d/green "$(git rev-parse HEAD)"
+
 if [[ -n "${1:-}" ]]; then
 	v="${1#v}"
 else
@@ -48,8 +50,6 @@ else
 fi
 series="$(echo "$v" | cut -d. -f1-2)"
 echo "releasing v${v} (series ${series})"
-
-dev/verify
 
 rm -rf dist && mkdir -p dist
 ldflags="-X main.Version=v${v} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')"
