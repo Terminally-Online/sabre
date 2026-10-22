@@ -23,10 +23,9 @@ if ! installed golangci-lint "$GOLANGCI_LINT_VERSION-$TOOLCHAIN"; then
 	stamp golangci-lint "$GOLANGCI_LINT_VERSION-$TOOLCHAIN"
 fi
 
-for tool in govulncheck staticcheck; do
+for tool in staticcheck; do
 	installed "$tool" "$TOOLCHAIN" && continue
 	case "$tool" in
-	govulncheck) pkg="golang.org/x/vuln/cmd/govulncheck@latest" ;;
 	staticcheck) pkg="honnef.co/go/tools/cmd/staticcheck@latest" ;;
 	esac
 	stage="$(mktemp -d "$CACHE/stage.XXXXXX")" || exit 1
@@ -39,4 +38,4 @@ for tool in govulncheck staticcheck; do
 	stamp "$tool" "$TOOLCHAIN"
 done
 
-echo "golangci-lint $GOLANGCI_LINT_VERSION, govulncheck, staticcheck ready in $TOOLS"
+echo "golangci-lint $GOLANGCI_LINT_VERSION, staticcheck ready in $TOOLS"

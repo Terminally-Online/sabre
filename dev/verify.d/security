@@ -2,7 +2,6 @@
 set -uo pipefail
 source "$(dirname "$0")/common"
 
-"$TOOLS/govulncheck" ./... || exit 1
 "$TOOLS/staticcheck" ./... || exit 1
 
 docker_ready() {
@@ -21,10 +20,16 @@ docker_ready() {
 }
 
 if ! docker_ready; then
-	echo "FAIL: the secret scan needs docker and it is not responding."
+	echo "FAIL: the vulnerability gate and the secret scan need docker, and it is not responding."
 	echo "Start Docker Desktop, then rerun this lane."
 	exit 1
 fi
+
+common="$(git rev-parse --path-format=absolute --git-common-dir)"
+docker run --rm --platform linux/amd64 \
+	-v "$ROOT:$ROOT:ro" -v "$common:$common:ro" -w "$ROOT" \
+	-v vulngate-gomod:/go/pkg/mod -v vulngate-gocache:/root/.cache/go-build \
+	git.ca.plug.to/terminally-online/ci-security:1 vulngate || exit 1
 
 docker run --rm -v "$ROOT:/pwd" trufflesecurity/trufflehog:latest \
 	filesystem --directory /pwd --only-verified --fail

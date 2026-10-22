@@ -53,14 +53,16 @@ jobs:
 
   security:
     runs-on: golang
+    container:
+      image: git.ca.plug.to/terminally-online/ci-security:1
     steps:
       - uses: actions/checkout@v4
-      - name: govulncheck, staticcheck, secret scan
+      - name: vulngate
+        run: vulngate
+      - name: staticcheck, secret scan
         run: |
           set -euo pipefail
-          GOTOOLCHAIN="$(go env GOVERSION)" go install golang.org/x/vuln/cmd/govulncheck@latest
           GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
           "$(go env GOPATH)/bin/staticcheck" ./...
           # dev/verify.d/security reaches trufflehog through `docker run`,
           # which is how a laptop gets the binary. A job container has no
