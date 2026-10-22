@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -o sabre ./cmd/sabre
 
 # Production stage
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Install runtime dependencies
 RUN apk --no-cache add ca-certificates tzdata

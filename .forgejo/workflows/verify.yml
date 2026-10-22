@@ -14,7 +14,7 @@ on:
   pull_request:
 
 env:
-  GOLANGCI_LINT_VERSION: v2.11.3
+  GOLANGCI_LINT_VERSION: v2.15.0
 
 jobs:
   lint:
@@ -28,7 +28,7 @@ jobs:
       - name: go vet and golangci-lint
         run: |
           set -euo pipefail
-          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          GOTOOLCHAIN="$(go env GOVERSION)" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
           base="$(git merge-base origin/master HEAD 2>/dev/null || git rev-parse HEAD~1)"
           go vet ./...
           "$(go env GOPATH)/bin/golangci-lint" run --allow-parallel-runners --timeout=5m --new-from-rev="$base"
@@ -58,8 +58,8 @@ jobs:
       - name: govulncheck, staticcheck, secret scan
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          GOTOOLCHAIN="$(go env GOVERSION)" go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
           "$(go env GOPATH)/bin/staticcheck" ./...
           # dev/verify.d/security reaches trufflehog through `docker run`,

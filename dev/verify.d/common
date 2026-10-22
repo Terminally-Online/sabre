@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-GOLANGCI_LINT_VERSION="v2.11.3"
+GOLANGCI_LINT_VERSION="v2.15.0"
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
@@ -10,6 +10,7 @@ TOOLS="$CACHE/bin"
 mkdir -p "$TOOLS"
 export GOLANGCI_LINT_CACHE="$CACHE/golangci"
 export CGO_ENABLED=0
+TOOLCHAIN="$(go env GOVERSION)"
 
 CORES="${VERIFY_CORES:-4}"
 export GOMAXPROCS="$CORES"
